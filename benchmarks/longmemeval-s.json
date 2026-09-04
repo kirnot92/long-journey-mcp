@@ -1,0 +1,8 @@
+{
+  "dataset_path": "../TestResults/benchmark-input/longmemeval_s_cleaned.json",
+  "split": "s",
+  "output_directory": "../TestResults/benchmark-s",
+  "limit": 500,
+  "experiment_budget_usd": 10,
+  "meditation_budget_usd": 5
+}

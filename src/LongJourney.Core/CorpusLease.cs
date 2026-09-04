@@ -1,6 +1,4 @@
-using LongJourney.Core;
-
-namespace LongJourney.Server;
+namespace LongJourney.Core;
 
 /// <summary>A process lifetime OS lock, acquired before SQLite/source recovery.</summary>
 public sealed class CorpusLease : IDisposable

@@ -1,8 +1,8 @@
 using LongJourney.Core;
 
-namespace LongJourney.Server;
+namespace LongJourney.OpenAI;
 
-/// <summary>Reads server credentials without copying secrets into configuration or process environment.</summary>
+/// <summary>Reads API credentials without copying secrets into configuration or process environment.</summary>
 public sealed class OpenAiApiKeySource
 {
     private readonly string _keyFilePath;
@@ -77,9 +77,10 @@ public sealed class OpenAiApiKeySource
             return localFile;
         }
 
-        // dotnet run --project starts in src/LongJourney.Server. Recognize only this repository layout.
+        // Project launches use their project directory. Recognize only this repository layout.
         var repositoryRoot = Path.GetFullPath(Path.Combine(contentRoot, "..", ".."));
-        if (File.Exists(Path.Combine(contentRoot, "LongJourney.Server.csproj")) &&
+        if ((File.Exists(Path.Combine(contentRoot, "LongJourney.Server.csproj")) ||
+            File.Exists(Path.Combine(contentRoot, "LongJourney.Benchmarks.csproj"))) &&
             File.Exists(Path.Combine(repositoryRoot, "LongJourney.slnx")))
         {
             return Path.Combine(repositoryRoot, "key.txt");

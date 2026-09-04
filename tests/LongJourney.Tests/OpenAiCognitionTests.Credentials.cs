@@ -1,5 +1,5 @@
 using LongJourney.Core;
-using LongJourney.Server;
+using LongJourney.OpenAI;
 
 namespace LongJourney.Tests;
 

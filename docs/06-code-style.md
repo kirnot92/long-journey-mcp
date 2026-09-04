@@ -126,5 +126,5 @@ dotnet test LongJourney.slnx --configuration Release --no-restore
 | ConsolidationEngine / MemoryScheduler | 근거 선택, 제안 보존·적용, 실행 기간과 재시도 |
 | SqliteMemoryStore / SourceArchive / SqliteSchema | 쓰기 트랜잭션, 불변 원문, DB 제약 |
 | SqliteMemoryStore.Reads | 단건·원문·고정 스냅샷 조회와 부모·관계 구성 |
-| OpenAiCognition | 요청 구성, 비용 예약·정산, 응답 검증 |
+| OpenAiCognition / OpenAiClient | 인지 제안 계약 / API 요청·비용 예약·정산·응답 검증 |
 | AppHost / SchedulerWorker | 프로세스 초기화와 반복 작업 수명 |

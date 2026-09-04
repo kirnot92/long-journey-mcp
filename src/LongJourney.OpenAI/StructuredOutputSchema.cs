@@ -3,7 +3,7 @@ using System.Text.Json.Nodes;
 
 namespace LongJourney.OpenAI;
 
-internal static class ProposalSchema
+public static class StructuredOutputSchema
 {
     public static JsonObject Text(int maximumLength)
     {

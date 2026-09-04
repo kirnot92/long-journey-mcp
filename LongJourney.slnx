@@ -1,5 +1,6 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/LongJourney.Benchmarks/LongJourney.Benchmarks.csproj" />
     <Project Path="src/LongJourney.Core/LongJourney.Core.csproj" />
     <Project Path="src/LongJourney.OpenAI/LongJourney.OpenAI.csproj" />
     <Project Path="src/LongJourney.Server/LongJourney.Server.csproj" />

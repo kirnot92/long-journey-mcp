@@ -17,6 +17,7 @@ public sealed class EngineOptions
     {
         get; set;
     }
+    public bool DreamAssimilationEnabled { get; set; } = true;
     public bool SchedulerEnabled { get; set; } = true;
     public int SchedulerPollSeconds { get; set; } = 60;
 

@@ -5,6 +5,17 @@ namespace LongJourney.OpenAI;
 /// <summary>Standard API pricing; cached reads and cache writes are disjoint input categories.</summary>
 public static class OpenAiPricing
 {
+    public static void ValidateModel(ModelOptions? model, string operation)
+    {
+        if (model is null || string.IsNullOrWhiteSpace(model.Model) || model.MaxOutputTokens < 1 ||
+            model.InputUsdPerMillion <= 0 || model.CachedInputUsdPerMillion < 0 || model.CacheWriteUsdPerMillion < 0 ||
+            model.OutputUsdPerMillion <= 0 || model.LongContextThresholdTokens < 1 ||
+            model.LongContextInputMultiplier < 1 || model.LongContextOutputMultiplier < 1)
+        {
+            throw new InputException($"Invalid OpenAI model/pricing configuration for {operation}.");
+        }
+    }
+
     public static decimal Calculate(ModelOptions model, long input, long cached, long writes, long output)
     {
         if (input < 0 || cached < 0 || writes < 0 || output < 0 || cached > input || writes > input - cached)

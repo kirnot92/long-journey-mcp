@@ -1,6 +1,6 @@
 # Long Journey MCP
 
-C#/.NET 10으로 구현한 공유 기억 서버다. 원문 Source를 Markdown으로 보존하고, SQLite에 기억·단방향 관계·provenance를 쌓는다. 현재 구현 범위는 Phase 1~4(Core, Daily Dream, Weekly Meditation, Inspection)다. Benchmark는 이후 단계다.
+C#/.NET 10으로 구현한 공유 기억 서버다. 원문 Source를 Markdown으로 보존하고, SQLite에 기억·단방향 관계·provenance를 쌓는다. 현재 구현 범위는 Phase 1~5(Core, Daily Dream, Weekly Meditation, Inspection, Benchmark)다.
 
 ## 실행
 
@@ -38,3 +38,9 @@ dotnet test LongJourney.slnx
 - [Inspection 화면과 조회 계약](docs/09-inspection.md)
 
 기본 모델은 Remember `gpt-5.6-terra/low`, Recall `gpt-5.6-terra/medium`, Dream `gpt-5.6-terra/high`, Meditation `gpt-5.6-sol/high`, embedding `text-embedding-3-large`다. 모든 운영 semantic processing은 OpenAI Responses/Embeddings API로 수행한다.
+
+## Benchmark
+
+LongMemEval 이력을 재생하여 원문 전체·Remember·Dream·관계·Meditation의 다섯 조건을 비교한다. 실험별 저장소, 중단 후 재개, 답변·채점 분리, 비용 상한과 그래프 검사를 지원한다. 첫 파일럿의 전체 상한은 10달러, 주간 Meditation은 실행당 최대 5달러다. 이 값은 사용 목표가 아니라 상한이다.
+
+실행 순서와 결과 해석은 [Benchmark 설계와 실행](docs/10-benchmark.md)을 참고한다. benchmarks/pilot.json은 한 문항 oracle 기능 확인이고 공식 성능 점수가 아니다.

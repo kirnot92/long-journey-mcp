@@ -1,0 +1,8 @@
+{
+  "dataset_path": "../TestResults/benchmark-input/longmemeval_oracle.json",
+  "split": "oracle",
+  "output_directory": "../TestResults/benchmark-pilot",
+  "question_ids": ["ceb54acb"],
+  "experiment_budget_usd": 10,
+  "meditation_budget_usd": 5
+}

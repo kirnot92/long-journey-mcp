@@ -125,7 +125,7 @@ dotnet run --project src/LongJourney.Server -- --reindex --Engine:DataDirectory=
 2026-09-04 사용자 요청으로 환경변수 외에 key.txt 입력을 지원한다. API 사용 확정 원문은 보존하며 인증 입력에 관한 현재 동작은 이 절을 따른다.
 
 - OPENAI_API_KEY가 있으면 파일보다 우선한다.
-- 기본 파일은 서버 content root의 key.txt다. dotnet run --project로 src/LongJourney.Server에서 실행할 때에는 해당 프로젝트와 LongJourney.slnx가 있는 저장소 구조를 확인하여 루트의 key.txt도 사용한다. 프로젝트 폴더에 key.txt가 있으면 그 파일이 우선한다.
+- 기본 파일은 서버 content root의 key.txt다. dotnet run --project로 src/LongJourney.Server 또는 src/LongJourney.Benchmarks에서 실행할 때에는 해당 프로젝트와 LongJourney.slnx가 있는 저장소 구조를 확인하여 루트의 key.txt도 사용한다. 프로젝트 폴더에 key.txt가 있으면 그 파일이 우선한다.
 - 다른 위치는 --OpenAI:ApiKeyFile=D:/Secrets/key.txt 또는 OpenAI__ApiKeyFile로 지정한다. 상대 경로는 content root 기준이다.
 - 파일에는 키 한 개만 넣는다. 앞뒤 공백·개행은 제거하며 내부 공백이나 여러 줄의 값은 오류로 처리한다.
 - 파일 내용은 API 요청마다 읽으므로 같은 파일의 키를 교체한 뒤 다음 요청부터 적용된다. 파일 경로 설정을 변경하면 서버를 다시 시작한다.

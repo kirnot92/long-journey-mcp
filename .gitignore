@@ -8,3 +8,4 @@ TestResults/
 appsettings.Local.json
 .env
 *.user
+key.txt

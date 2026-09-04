@@ -142,6 +142,7 @@ public sealed partial class ServerTests
             RedirectStandardError = true
         };
         start.ArgumentList.Add(typeof(AppHost).Assembly.Location);
+        start.ArgumentList.Add("--contentRoot=" + directory);
         start.ArgumentList.Add("--no-scheduler");
         start.ArgumentList.Add("--Server:Port=0");
         start.ArgumentList.Add("--Engine:DataDirectory=" + directory);

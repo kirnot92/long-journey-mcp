@@ -586,7 +586,7 @@ public sealed class OpenAiCognition : ICognition
         var key = _apiKey();
         if (string.IsNullOrWhiteSpace(key))
         {
-            throw new InputException("Set OPENAI_API_KEY before using cognitive operations.");
+            throw new InputException("An OpenAI API key is required before using cognitive operations.");
         }
         var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, path));
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);

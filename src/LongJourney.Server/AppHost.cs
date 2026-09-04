@@ -38,6 +38,8 @@ public static class AppHost
         var openAiOptions = builder.Configuration.GetSection("OpenAI").Get<OpenAiOptions>() ?? new();
         ConfigureLocalListener(builder);
         ConfigureOperationalLogging(builder);
+        builder.Services.AddSingleton(new OpenAiApiKeySource(
+            builder.Environment.ContentRootPath, builder.Configuration["OpenAI:ApiKeyFile"]));
         RegisterMemoryServices(builder.Services, engineOptions, openAiOptions);
 
         builder.Services.AddRazorPages();
@@ -127,7 +129,13 @@ public static class AppHost
         services.AddSingleton<IInspectionReader>(provider => (IInspectionReader)provider.GetRequiredService<IMemoryStore>());
         services.AddSingleton<IUsageLedger>(provider => provider.GetRequiredService<IMemoryStore>());
         services.AddSingleton(_ => new HttpClient { Timeout = Timeout.InfiniteTimeSpan });
-        services.TryAddSingleton<ICognition, OpenAiCognition>();
+        services.TryAddSingleton<ICognition>(provider => new OpenAiCognition(
+            provider.GetRequiredService<HttpClient>(),
+            openAiOptions,
+            engineOptions,
+            provider.GetRequiredService<IUsageLedger>(),
+            provider.GetRequiredService<TimeProvider>(),
+            provider.GetRequiredService<OpenAiApiKeySource>().Read));
         services.AddSingleton<MemorySearch>();
         services.AddSingleton<IMemorySearch>(provider => provider.GetRequiredService<MemorySearch>());
         services.AddSingleton<MemoryEngine>();

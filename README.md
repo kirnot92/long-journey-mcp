@@ -9,7 +9,7 @@ C#/.NET 10으로 구현한 공유 기억 서버다. 원문 Source를 Markdown으
 ```powershell
 dotnet restore LongJourney.slnx
 dotnet build LongJourney.slnx
-# OPENAI_API_KEY는 현재 프로세스의 환경변수로 전달한다. 파일에 저장하지 않는다.
+# 저장소 루트의 key.txt에 API key 한 개를 넣거나 OPENAI_API_KEY 환경변수를 설정한다.
 dotnet run --project src/LongJourney.Server -- --Engine:DataDirectory=D:/LongJourneyData
 ```
 

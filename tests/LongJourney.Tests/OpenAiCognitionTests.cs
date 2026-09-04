@@ -7,7 +7,7 @@ using LongJourney.OpenAI;
 
 namespace LongJourney.Tests;
 
-public sealed class OpenAiCognitionTests
+public sealed partial class OpenAiCognitionTests
 {
     [Fact]
     public async Task RememberUsesDirectResponsesStructuredOutputAndAccountsCacheWrites()

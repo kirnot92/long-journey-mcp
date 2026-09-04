@@ -24,7 +24,7 @@ Host는 `localhost`, `127.0.0.1`, `[::1]`만 허용하고, Origin 헤더가 있�
 
 ## 설정
 
-기본값은 Core의 `EngineOptions`, `OpenAiOptions`에 있고 서버 `appsettings.json`, 환경변수, 명령행으로 바꿀 수 있다. 환경변수의 중첩 구분자는 `__`, 명령행은 `:`이다. API key는 **`OPENAI_API_KEY` 환경변수만** 사용한다. 아래 예시는 저장소 루트에서 실행한다.
+기본값은 Core의 `EngineOptions`, `OpenAiOptions`에 있고 서버 `appsettings.json`, 환경변수, 명령행으로 바꿀 수 있다. 환경변수의 중첩 구분자는 `__`, 명령행은 `:`이다. API key는 `OPENAI_API_KEY` 환경변수를 우선 사용하고, 없으면 로컬 `key.txt`에서 읽는다. 아래 예시는 저장소 루트에서 실행한다.
 
 ```powershell
 dotnet run --project src/LongJourney.Server -- --Server:Port=5088 --Engine:DataDirectory=D:/LongJourneyData
@@ -119,3 +119,15 @@ dotnet run --project src/LongJourney.Server -- --reindex --Engine:DataDirectory=
 ```
 
 백업은 서버를 종료한 뒤 데이터 폴더 전체를 복사한다. SQLite 파일과 `sources`를 함께 보존해야 provenance를 복구할 수 있다. 원본 파일이나 DB를 손으로 수정하는 방식은 지원하지 않는다.
+
+## 로컬 API key 파일
+
+2026-09-04 사용자 요청으로 환경변수 외에 key.txt 입력을 지원한다. API 사용 확정 원문은 보존하며 인증 입력에 관한 현재 동작은 이 절을 따른다.
+
+- OPENAI_API_KEY가 있으면 파일보다 우선한다.
+- 기본 파일은 서버 content root의 key.txt다. dotnet run --project로 src/LongJourney.Server에서 실행할 때에는 해당 프로젝트와 LongJourney.slnx가 있는 저장소 구조를 확인하여 루트의 key.txt도 사용한다. 프로젝트 폴더에 key.txt가 있으면 그 파일이 우선한다.
+- 다른 위치는 --OpenAI:ApiKeyFile=D:/Secrets/key.txt 또는 OpenAI__ApiKeyFile로 지정한다. 상대 경로는 content root 기준이다.
+- 파일에는 키 한 개만 넣는다. 앞뒤 공백·개행은 제거하며 내부 공백이나 여러 줄의 값은 오류로 처리한다.
+- 파일 내용은 API 요청마다 읽으므로 같은 파일의 키를 교체한 뒤 다음 요청부터 적용된다. 파일 경로 설정을 변경하면 서버를 다시 시작한다.
+- 누락·빈 파일 상태에서도 Inspector는 사용할 수 있다. 인지 작업에는 키가 필요하다.
+- key.txt는 Git에서 제외한다. 파일 내용을 로그·응답·설정 객체 또는 프로세스 환경변수에 복사하지 않는다.

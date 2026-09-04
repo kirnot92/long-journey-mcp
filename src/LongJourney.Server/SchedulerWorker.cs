@@ -8,15 +8,25 @@ public sealed class SchedulerWorker(
     MemoryScheduler scheduler,
     EngineOptions options,
     ICognition cognition,
+    OpenAiApiKeySource apiKeySource,
     TimeProvider timeProvider,
     ILogger<SchedulerWorker> logger) : BackgroundService
 {
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
-        if (cognition is OpenAiCognition &&
-            string.IsNullOrWhiteSpace(Environment.GetEnvironmentVariable("OPENAI_API_KEY")))
+        if (cognition is OpenAiCognition)
         {
-            logger.LogWarning("OPENAI_API_KEY is not set. Cognitive operations will return a configuration error until it is available.");
+            try
+            {
+                if (apiKeySource.Read() is null)
+                {
+                    logger.LogWarning("Set OPENAI_API_KEY or provide key.txt before using cognitive operations.");
+                }
+            }
+            catch (InputException)
+            {
+                logger.LogWarning("OpenAI credentials are unreadable or invalid. Check OPENAI_API_KEY, key.txt or OpenAI:ApiKeyFile.");
+            }
         }
 
         if (!options.SchedulerEnabled)

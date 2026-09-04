@@ -23,7 +23,15 @@ public sealed class MemoryEngine(
             return store.ReadRememberResult(sourceId, true);
         }
 
-        return await ExtractAndSaveObservationsAsync(artifact, cancellationToken);
+        try
+        {
+            return await ExtractAndSaveObservationsAsync(artifact, cancellationToken);
+        }
+        catch
+        {
+            store.FailSource(sourceId);
+            throw;
+        }
     }
 
     public async Task<IReadOnlyList<IngestionFailure>> ResumePendingAsync(
@@ -182,45 +190,37 @@ public sealed class MemoryEngine(
         SourceArtifact artifact,
         CancellationToken cancellationToken)
     {
-        try
+        if (string.IsNullOrWhiteSpace(artifact.Raw))
         {
-            if (string.IsNullOrWhiteSpace(artifact.Raw))
-            {
-                store.CompleteSource(artifact.Source.Id, [], timeProvider.GetUtcNow());
-                return new RememberResult(artifact.Source.Id, false, []);
-            }
-
-            var proposals = await cognition.ExtractAsync(artifact.Raw, new CallContext(), cancellationToken);
-            if (proposals.Value.Count > options.MaxObservations)
-            {
-                throw new InvariantException("Provider returned too many observations.");
-            }
-
-            var observations = new List<NewObservation>();
-            foreach (var proposal in proposals.Value)
-            {
-                if (string.IsNullOrWhiteSpace(proposal.Content) ||
-                    proposal.Content.Length > options.MaxMemoryCharacters)
-                {
-                    throw new InvariantException("Provider returned invalid observation content.");
-                }
-
-                var embedding = await cognition.EmbedAsync(proposal.Content, new CallContext(), cancellationToken);
-                if (embedding.Space != cognition.EmbeddingSpace)
-                {
-                    throw new InvariantException("Embedding model space mismatch.");
-                }
-
-                observations.Add(new NewObservation(proposal.Content, proposals.Model, embedding));
-            }
-
-            store.CompleteSource(artifact.Source.Id, observations, timeProvider.GetUtcNow());
-            return store.ReadRememberResult(artifact.Source.Id, false);
+            store.CompleteSource(artifact.Source.Id, [], timeProvider.GetUtcNow());
+            return new RememberResult(artifact.Source.Id, false, []);
         }
-        catch
+
+        var proposals = await cognition.ExtractAsync(artifact.Raw, new CallContext(), cancellationToken);
+        if (proposals.Value.Count > options.MaxObservations)
         {
-            store.FailSource(artifact.Source.Id);
-            throw;
+            throw new InvariantException("Provider returned too many observations.");
         }
+
+        var observations = new List<NewObservation>();
+        foreach (var proposal in proposals.Value)
+        {
+            if (string.IsNullOrWhiteSpace(proposal.Content) ||
+                proposal.Content.Length > options.MaxMemoryCharacters)
+            {
+                throw new InvariantException("Provider returned invalid observation content.");
+            }
+
+            var embedding = await cognition.EmbedAsync(proposal.Content, new CallContext(), cancellationToken);
+            if (embedding.Space != cognition.EmbeddingSpace)
+            {
+                throw new InvariantException("Embedding model space mismatch.");
+            }
+
+            observations.Add(new NewObservation(proposal.Content, proposals.Model, embedding));
+        }
+
+        store.CompleteSource(artifact.Source.Id, observations, timeProvider.GetUtcNow());
+        return store.ReadRememberResult(artifact.Source.Id, false);
     }
 }

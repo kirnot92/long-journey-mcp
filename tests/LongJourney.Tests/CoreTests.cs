@@ -96,6 +96,54 @@ public sealed class CoreTests
     }
 
     [Fact]
+    public async Task UnreadableSourceDoesNotStarveOtherRecoveryWork()
+    {
+        using var fixture = new Fixture();
+        var missing = fixture.Store.SaveSource("missing source archive", Day);
+        var good = fixture.Store.SaveSource("recoverable source", Day.AddMinutes(1));
+        File.Delete(Path.Combine(fixture.Directory, missing.Source.RelativePath));
+
+        var failures = await fixture.Engine.ResumePendingAsync();
+
+        var failure = Assert.Single(failures);
+        Assert.Equal(missing.Source.Id, failure.SourceId);
+        Assert.Equal(nameof(FileNotFoundException), failure.ErrorType);
+        var incompleteSource = Assert.Single(fixture.Store.GetIncompleteSources());
+        Assert.Equal(missing.Source.Id, incompleteSource.Id);
+        Assert.Equal("failed", incompleteSource.Status);
+        Assert.Empty(fixture.Store.GetSourceMemories(missing.Source.Id));
+        Assert.Single(fixture.Store.GetSourceMemories(good.Source.Id));
+    }
+
+    [Fact]
+    public async Task CancelledRecoveryLeavesClaimedSourceRetryable()
+    {
+        using var fixture = new Fixture();
+        using var cancellation = new CancellationTokenSource();
+        var source = fixture.Store.SaveSource("cancelled recovery", Day);
+        fixture.Cognition.BeforeExtract = () =>
+        {
+            cancellation.Cancel();
+            cancellation.Token.ThrowIfCancellationRequested();
+            return Task.CompletedTask;
+        };
+
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => fixture.Engine.ResumePendingAsync(cancellation.Token));
+
+        var incompleteSource = Assert.Single(fixture.Store.GetIncompleteSources());
+        Assert.Equal(source.Source.Id, incompleteSource.Id);
+        Assert.Equal("failed", incompleteSource.Status);
+        Assert.Equal(source.Raw, fixture.Store.ReadSource(source.Source.Id).Raw);
+        Assert.Empty(fixture.Store.GetSourceMemories(source.Source.Id));
+
+        fixture.Cognition.BeforeExtract = null;
+        Assert.Empty(await fixture.Engine.ResumePendingAsync());
+        Assert.Single(fixture.Store.GetSourceMemories(source.Source.Id));
+        Assert.Empty(fixture.Store.GetIncompleteSources());
+    }
+
+    [Fact]
     public async Task TooLargeInputIsRejectedBeforeArchiveOrLlm()
     {
         using var fixture = new Fixture();

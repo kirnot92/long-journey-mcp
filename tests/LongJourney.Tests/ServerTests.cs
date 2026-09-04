@@ -143,6 +143,75 @@ public sealed class ServerTests
         Assert.True(allowed.TryGetProperty("result", out _), allowed.ToString());
     }
 
+    [Theory]
+    [InlineData("")]
+    [InlineData(" ")]
+    [InlineData("\t")]
+    public Task RejectsBlankDataDirectoryBeforeCreatingCorpusFiles(string configuredDirectory)
+    {
+        return AssertConfigurationRejectedBeforeOpeningCorpusAsync(
+            "Engine:DataDirectory", configuredDirectory);
+    }
+
+    [Theory]
+    [InlineData("4294968")]
+    [InlineData("2147483647")]
+    public Task RejectsUnsupportedPollIntervalBeforeCreatingCorpusFiles(string configuredInterval)
+    {
+        return AssertConfigurationRejectedBeforeOpeningCorpusAsync(
+            "Engine:SchedulerPollSeconds", configuredInterval);
+    }
+
+    [Fact]
+    public void LargestSupportedPollIntervalPassesConfigurationAndTaskDelayValidation()
+    {
+        var options = new EngineOptions { SchedulerPollSeconds = 4_294_967 };
+        options.Validate();
+
+        // Cancellation avoids waiting while still exercising Task.Delay's real timeout validation.
+        var delay = Task.Delay(
+            TimeSpan.FromSeconds(options.SchedulerPollSeconds),
+            TimeProvider.System,
+            new CancellationToken(canceled: true));
+
+        Assert.True(delay.IsCanceled);
+    }
+
+    private static async Task AssertConfigurationRejectedBeforeOpeningCorpusAsync(
+        string settingName,
+        string settingValue)
+    {
+        var contentRoot = Path.Combine(
+            Path.GetTempPath(), "long-journey-invalid-config-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(contentRoot);
+        WebApplication? app = null;
+        try
+        {
+            var error = Assert.Throws<InputException>(() =>
+            {
+                app = AppHost.Build(["--contentRoot", contentRoot], builder =>
+                {
+                    RunningHost.Configure(builder, contentRoot, new CannedCognition());
+                    builder.Configuration["Engine:SchedulerEnabled"] = "true";
+                    builder.Configuration[settingName] = settingValue;
+                });
+            });
+
+            Assert.Contains(settingName, error.Message);
+            Assert.Empty(Directory.EnumerateFileSystemEntries(contentRoot));
+        }
+        finally
+        {
+            if (app is not null)
+            {
+                await app.DisposeAsync();
+            }
+
+            // This test owns the absolute, uniquely named directory created above.
+            Directory.Delete(contentRoot, recursive: true);
+        }
+    }
+
     private static JsonElement Structured(JsonElement response)
     {
         Assert.True(response.TryGetProperty("result", out var result), response.ToString());
@@ -175,21 +244,29 @@ public sealed class ServerTests
             var directory = Path.Combine(Path.GetTempPath(), "long-journey-http-" + Guid.NewGuid().ToString("N"));
             var cognition = new CannedCognition();
             var app = AppHost.Build([], builder => Configure(builder, directory, cognition));
-            await app.StartAsync();
-            var server = app.Services.GetRequiredService<IServer>();
-            var addresses = server.Features.Get<IServerAddressesFeature>()!.Addresses;
-            var address = Assert.Single(addresses);
-            return new RunningHost
+            try
             {
-                App = app,
-                DirectoryPath = directory,
-                Cognition = cognition,
-                Client = new HttpClient
+                await app.StartAsync();
+                var server = app.Services.GetRequiredService<IServer>();
+                var addresses = server.Features.Get<IServerAddressesFeature>()!.Addresses;
+                var address = Assert.Single(addresses);
+                return new RunningHost
                 {
-                    BaseAddress = new Uri(address + "/"),
-                    Timeout = TimeSpan.FromSeconds(20)
-                }
-            };
+                    App = app,
+                    DirectoryPath = directory,
+                    Cognition = cognition,
+                    Client = new HttpClient
+                    {
+                        BaseAddress = new Uri(address + "/"),
+                        Timeout = TimeSpan.FromSeconds(20)
+                    }
+                };
+            }
+            catch
+            {
+                await app.DisposeAsync();
+                throw;
+            }
         }
 
         public static void Configure(WebApplicationBuilder builder, string directory, CannedCognition cognition)

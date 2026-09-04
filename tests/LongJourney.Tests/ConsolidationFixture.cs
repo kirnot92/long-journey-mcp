@@ -103,7 +103,7 @@ internal sealed class ConsolidationSearch : IMemorySearch
         return Task.FromResult<IReadOnlyList<MemoryRecord>>(candidates);
     }
 
-    private static MemoryRecord[] SelectCandidates(
+    private static IReadOnlyList<MemoryRecord> SelectCandidates(
         IReadOnlyList<MemoryRecord> memories, int? depth, int limit, string? excludedId = null)
     {
         var candidates = new List<MemoryRecord>();
@@ -122,7 +122,7 @@ internal sealed class ConsolidationSearch : IMemorySearch
             candidates.Add(memory);
         }
 
-        return candidates.ToArray();
+        return candidates;
     }
 }
 

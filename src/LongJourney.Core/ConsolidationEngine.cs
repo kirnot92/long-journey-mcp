@@ -55,14 +55,16 @@ public sealed class ConsolidationEngine(
                 return ReadRunSummary(run.Id, run.Status);
             }
 
-            var frozenEvidence = store.ReadSnapshot(run);
+            // Frozen evidence may be shared by many carried items, but work status stays live.
+            var frozenRuns = new Dictionary<long, FrozenRunEvidence>();
+            var frozenEvidence = ReadFrozenRun(run, frozenRuns).Snapshot;
             if (kind == RunKind.Dream)
             {
                 EnsureDreamWorkItems(run, frozenEvidence);
             }
             else
             {
-                EnsureMeditationWorkItems(run, frozenEvidence);
+                EnsureMeditationWorkItems(run, frozenEvidence, frozenRuns);
             }
 
             try
@@ -77,7 +79,7 @@ public sealed class ConsolidationEngine(
                         continue;
                     }
 
-                    await ProcessScheduledWorkAsync(run, item, frozenEvidence, cancellationToken);
+                    await ProcessScheduledWorkAsync(run, item, frozenRuns, cancellationToken);
                 }
 
                 store.FinishRun(run.Id, "complete", timeProvider.GetUtcNow());
@@ -99,26 +101,33 @@ public sealed class ConsolidationEngine(
     private async Task ProcessScheduledWorkAsync(
         RunRecord chargedRun,
         RunWorkItem scheduledItem,
-        GraphSnapshot currentRunEvidence,
+        Dictionary<long, FrozenRunEvidence> frozenRuns,
         CancellationToken cancellationToken)
     {
         var chargedCallContext = new CallContext(chargedRun.Id);
         if (!TryGetCarryOrigin(scheduledItem, out var originRunId, out var originKey))
         {
             await ProcessOriginalWorkAsync(
-                chargedRun, scheduledItem, currentRunEvidence, chargedCallContext, cancellationToken);
+                chargedRun, scheduledItem, frozenRuns[chargedRun.Id].Snapshot,
+                chargedCallContext, cancellationToken);
             return;
         }
 
-        var originRun = ReadCarryOriginRun(originRunId);
+        // Proposals and completion may have changed while earlier items were applied.
         var originalItem = ReadOriginalWorkItem(originRunId, originKey);
         if (originalItem.Status != "complete")
         {
+            if (!frozenRuns.TryGetValue(originRunId, out var originalEvidence))
+            {
+                var originRun = ReadCarryOriginRun(originRunId);
+                originalEvidence = ReadFrozenRun(originRun, frozenRuns);
+            }
+
             // Evidence, revision, and work identity belong to the original run.
             // Only API charges belong to the run that is executing the carry item now.
-            var originalEvidence = store.ReadSnapshot(originRun);
             await ProcessOriginalWorkAsync(
-                originRun, originalItem, originalEvidence, chargedCallContext, cancellationToken);
+                originalEvidence.Run, originalItem, originalEvidence.Snapshot,
+                chargedCallContext, cancellationToken);
         }
 
         store.CompleteWork(chargedRun.Id, scheduledItem.Key);
@@ -179,7 +188,10 @@ public sealed class ConsolidationEngine(
         store.EnsureWorkItems(run.Id, work);
     }
 
-    private void EnsureMeditationWorkItems(RunRecord run, GraphSnapshot snapshot)
+    private void EnsureMeditationWorkItems(
+        RunRecord run,
+        GraphSnapshot snapshot,
+        Dictionary<long, FrozenRunEvidence> frozenRuns)
     {
         var candidates = new List<MeditationCandidate>();
         foreach (var memory in snapshot.Memories)
@@ -203,7 +215,7 @@ public sealed class ConsolidationEngine(
                 continue;
             }
 
-            var originalMemories = store.ReadSnapshot(previousRun).ById;
+            IReadOnlyDictionary<string, MemoryRecord>? originalMemories = null;
             foreach (var pendingItem in store.GetWorkItems(previousRun.Id))
             {
                 if (pendingItem.Status == "complete" ||
@@ -212,6 +224,7 @@ public sealed class ConsolidationEngine(
                     continue;
                 }
 
+                originalMemories ??= ReadFrozenRun(previousRun, frozenRuns).Snapshot.ById;
                 if (!originalMemories.TryGetValue(pendingItem.MemoryId, out var memory))
                 {
                     continue;
@@ -621,6 +634,20 @@ public sealed class ConsolidationEngine(
             store.GetRejectedProposalCount(runId), store.GetRunAccountedUsd(runId));
     }
 
+    private FrozenRunEvidence ReadFrozenRun(
+        RunRecord run,
+        Dictionary<long, FrozenRunEvidence> frozenRuns)
+    {
+        if (frozenRuns.TryGetValue(run.Id, out var evidence))
+        {
+            return evidence;
+        }
+
+        evidence = new FrozenRunEvidence(run, store.ReadSnapshot(run));
+        frozenRuns.Add(run.Id, evidence);
+        return evidence;
+    }
+
     private RunRecord ReadCarryOriginRun(long runId)
     {
         RunRecord? matchingRun = null;
@@ -794,6 +821,8 @@ public sealed class ConsolidationEngine(
         workKey = parts[2];
         return true;
     }
+
+    private sealed record FrozenRunEvidence(RunRecord Run, GraphSnapshot Snapshot);
 
     private sealed record MeditationCandidate(
         WorkSeed Seed,

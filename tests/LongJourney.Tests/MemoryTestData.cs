@@ -4,12 +4,12 @@ namespace LongJourney.Tests;
 
 internal static class MemoryTestData
 {
-    public static string[] Ids(IReadOnlyList<MemoryRecord> memories)
+    public static List<string> Ids(IReadOnlyList<MemoryRecord> memories)
     {
-        var ids = new string[memories.Count];
-        for (var index = 0; index < memories.Count; index++)
+        var ids = new List<string>(memories.Count);
+        foreach (var memory in memories)
         {
-            ids[index] = memories[index].Id;
+            ids.Add(memory.Id);
         }
 
         return ids;

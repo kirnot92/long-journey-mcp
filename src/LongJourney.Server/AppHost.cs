@@ -69,8 +69,9 @@ public static class AppHost
             options.SchedulerEnabled = false;
         }
 
-        options.DataDirectory = Path.GetFullPath(options.DataDirectory, builder.Environment.ContentRootPath);
+        // Resolving an empty path would turn it into the content root and hide the invalid setting.
         options.Validate();
+        options.DataDirectory = Path.GetFullPath(options.DataDirectory, builder.Environment.ContentRootPath);
         return options;
     }
 

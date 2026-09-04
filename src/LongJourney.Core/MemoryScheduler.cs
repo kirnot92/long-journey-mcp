@@ -34,14 +34,20 @@ public sealed class MemoryScheduler(
                     "Scheduler timezone differs from the persisted calendar. Migrate scheduler state before changing it.");
             }
 
-            store.SetState(TimeZoneKey, options.TimeZoneId);
-            var anchor = ReadDate(AnchorKey) ?? FindAnchor(today, timeZone);
-            store.SetState(AnchorKey, Format(anchor));
+            if (savedTimeZoneId is null)
+            {
+                store.SetState(TimeZoneKey, options.TimeZoneId);
+            }
 
-            var nextDreamDate = ReadDate(DreamKey) ?? anchor;
-            var nextMeditationDate = ReadDate(MeditationKey) ?? anchor;
-            store.SetState(DreamKey, Format(nextDreamDate));
-            store.SetState(MeditationKey, Format(nextMeditationDate));
+            var anchor = ReadDate(AnchorKey);
+            if (anchor is null)
+            {
+                anchor = FindAnchor(today, timeZone);
+                store.SetState(AnchorKey, Format(anchor.Value));
+            }
+
+            var nextDreamDate = ReadOrInitializeDate(DreamKey, anchor.Value);
+            var nextMeditationDate = ReadOrInitializeDate(MeditationKey, anchor.Value);
             var completedRuns = new List<RunSummary>();
 
             // A week is ready only after all its daily periods have completed.
@@ -149,6 +155,18 @@ public sealed class MemoryScheduler(
         }
 
         return anchor;
+    }
+
+    private DateOnly ReadOrInitializeDate(string key, DateOnly initialDate)
+    {
+        var savedDate = ReadDate(key);
+        if (savedDate is not null)
+        {
+            return savedDate.Value;
+        }
+
+        store.SetState(key, Format(initialDate));
+        return initialDate;
     }
 
     private DateOnly? ReadDate(string key)

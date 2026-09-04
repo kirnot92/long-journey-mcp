@@ -22,23 +22,64 @@ public sealed class EngineOptions
 
     public void Validate()
     {
-        if (string.IsNullOrWhiteSpace(DataDirectory) ||
-            RootBase < 2 ||
-            MaxRawCharacters < 1 ||
-            MaxObservations < 1 ||
-            MaxMemoryCharacters < 1 ||
-            SearchCandidates < 1 ||
-            RecallLimit < 1 ||
-            NeighborhoodSize < RootBase ||
-            MeditationGraphLimit < NeighborhoodSize ||
-            MeditationSourceLimit < 1 ||
-            SchedulerPollSeconds < 1 ||
-            MeditationBudgetUsd is <= 0)
+        if (string.IsNullOrWhiteSpace(DataDirectory))
         {
-            throw new InputException("Invalid engine configuration. Bounds must be positive; RootBase must be at least 2.");
+            throw new InputException("Engine:DataDirectory must not be empty or whitespace.");
         }
 
-        _ = TimeZoneInfo.FindSystemTimeZoneById(TimeZoneId);
+        if (RootBase < 2)
+        {
+            throw new InputException("Engine:RootBase must be at least 2.");
+        }
+
+        RequirePositive(MaxRawCharacters, nameof(MaxRawCharacters));
+        RequirePositive(MaxObservations, nameof(MaxObservations));
+        RequirePositive(MaxMemoryCharacters, nameof(MaxMemoryCharacters));
+        RequirePositive(SearchCandidates, nameof(SearchCandidates));
+        RequirePositive(RecallLimit, nameof(RecallLimit));
+
+        if (NeighborhoodSize < RootBase)
+        {
+            throw new InputException("Engine:NeighborhoodSize must be at least Engine:RootBase.");
+        }
+
+        if (MeditationGraphLimit < NeighborhoodSize)
+        {
+            throw new InputException("Engine:MeditationGraphLimit must be at least Engine:NeighborhoodSize.");
+        }
+
+        RequirePositive(MeditationSourceLimit, nameof(MeditationSourceLimit));
+
+        // Task.Delay accepts at most uint.MaxValue - 1 milliseconds, including with a TimeProvider.
+        const int maximumPollSeconds = 4_294_967;
+        if (SchedulerPollSeconds < 1 || SchedulerPollSeconds > maximumPollSeconds)
+        {
+            throw new InputException(
+                $"Engine:SchedulerPollSeconds must be between 1 and {maximumPollSeconds} seconds.");
+        }
+
+        if (MeditationBudgetUsd is <= 0)
+        {
+            throw new InputException("Engine:MeditationBudgetUsd must be greater than zero when configured.");
+        }
+
+        try
+        {
+            _ = TimeZoneInfo.FindSystemTimeZoneById(TimeZoneId);
+        }
+        catch (Exception error) when (
+            error is TimeZoneNotFoundException or InvalidTimeZoneException or ArgumentException)
+        {
+            throw new InputException("Engine:TimeZoneId must name an available time zone.");
+        }
+    }
+
+    private static void RequirePositive(int value, string settingName)
+    {
+        if (value <= 0)
+        {
+            throw new InputException($"Engine:{settingName} must be greater than zero.");
+        }
     }
 }
 

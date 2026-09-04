@@ -7,7 +7,7 @@ using Microsoft.Data.Sqlite;
 namespace LongJourney.Core;
 
 /// <summary>Owns all graph mutations. SQL is never supplied by cognition.</summary>
-public sealed class SqliteMemoryStore : IMemoryStore
+public sealed partial class SqliteMemoryStore : IMemoryStore
 {
     private readonly EngineOptions _options;
     private readonly SourceArchive _sourceArchive;
@@ -45,8 +45,16 @@ public sealed class SqliteMemoryStore : IMemoryStore
     private SqliteConnection OpenConnection()
     {
         var db = new SqliteConnection(_connectionString);
-        db.Open();
-        return db;
+        try
+        {
+            db.Open();
+            return db;
+        }
+        catch
+        {
+            db.Dispose();
+            throw;
+        }
     }
 
     private static SqliteCommand CreateCommand(SqliteConnection db, SqliteTransaction? tx, string sql, params (string, object?)[] parameters)
@@ -155,35 +163,6 @@ public sealed class SqliteMemoryStore : IMemoryStore
         return _sourceArchive.Read(source);
     }
 
-    public RememberResult ReadRememberResult(string sourceId, bool duplicate)
-    {
-        using var db = OpenConnection();
-        using var tx = db.BeginTransaction(deferred: true);
-        var source = ReadSourceRow(db, tx, "id=$value", sourceId)
-            ?? throw new InputException("Source not found.");
-        var allMemories = ReadMemories(db, tx, long.MaxValue, long.MaxValue);
-        var sourceMemories = SelectSourceMemories(allMemories, sourceId);
-        tx.Commit();
-
-        return new RememberResult(sourceId, duplicate, sourceMemories, source.Status);
-    }
-
-    private static IReadOnlyList<MemoryRecord> SelectSourceMemories(
-        IReadOnlyList<MemoryRecord> memories,
-        string sourceId)
-    {
-        var sourceMemories = new List<MemoryRecord>();
-        foreach (var memory in memories)
-        {
-            if (memory.SourceRef == sourceId)
-            {
-                sourceMemories.Add(memory);
-            }
-        }
-
-        return sourceMemories;
-    }
-
     public bool ClaimSource(string sourceId)
     {
         using var db = OpenConnection();
@@ -270,210 +249,6 @@ public sealed class SqliteMemoryStore : IMemoryStore
             VALUES($id,$depth,$content,$source,$at,$revision,$model,$origin)
             """, ("$id", id), ("$depth", depth), ("$content", content), ("$source", source),
             ("$at", FormatTimestamp(now)), ("$revision", revision), ("$model", model), ("$origin", originKey));
-    }
-
-    // One read transaction keeps memory rows, outgoing edges, and recall history mutually consistent.
-    public GraphSnapshot ReadSnapshot(RunRecord? run = null)
-    {
-        using var db = OpenConnection();
-        using var tx = db.BeginTransaction(deferred: true);
-        var memoryHighWater = run?.MemoryHighWater ?? long.MaxValue;
-        var relationHighWater = run?.RelationHighWater ?? long.MaxValue;
-        var recallHighWater = run?.RecallHighWater ?? long.MaxValue;
-
-        var memories = ReadMemories(db, tx, memoryHighWater, relationHighWater);
-        var recalls = ReadRecallEvents(db, tx, recallHighWater);
-        if (run is not null)
-        {
-            RestoreRecallTimes(memories, recalls);
-        }
-
-        tx.Commit();
-        return new GraphSnapshot(memories, recalls);
-    }
-
-    private static List<RecallEvent> ReadRecallEvents(
-        SqliteConnection db,
-        SqliteTransaction tx,
-        long recallHighWater)
-    {
-        using var command = CreateCommand(db, tx,
-            "SELECT memory_id,recalled_at,seq FROM recall_events WHERE seq <= $max ORDER BY seq",
-            ("$max", recallHighWater));
-        using var reader = command.ExecuteReader();
-        var recalls = new List<RecallEvent>();
-        while (reader.Read())
-        {
-            recalls.Add(new RecallEvent(
-                reader.GetString(0),
-                ParseTimestamp(reader.GetString(1)),
-                reader.GetInt64(2)));
-        }
-
-        return recalls;
-    }
-
-    private static void RestoreRecallTimes(
-        List<MemoryRecord> memories,
-        IReadOnlyList<RecallEvent> recalls)
-    {
-        // A frozen run must not see recalls recorded after its high-water mark.
-        var latestRecallByMemory = new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
-        foreach (var recall in recalls)
-        {
-            if (!latestRecallByMemory.TryGetValue(recall.MemoryId, out var latestRecall) ||
-                recall.RecalledAt > latestRecall)
-            {
-                latestRecallByMemory[recall.MemoryId] = recall.RecalledAt;
-            }
-        }
-
-        for (var index = 0; index < memories.Count; index++)
-        {
-            var memory = memories[index];
-            DateTimeOffset? lastRecalledAt = null;
-            if (latestRecallByMemory.TryGetValue(memory.Id, out var recalledAt))
-            {
-                lastRecalledAt = recalledAt;
-            }
-
-            memories[index] = memory with
-            {
-                LastRecalledAt = lastRecalledAt
-            };
-        }
-    }
-
-    private static List<MemoryRecord> ReadMemories(
-        SqliteConnection db,
-        SqliteTransaction? tx,
-        long memoryMax,
-        long relationMax)
-    {
-        var parentsByMemory = ReadParentIds(db, tx);
-        var relationsByMemory = ReadRelations(db, tx, memoryMax, relationMax);
-        using var command = CreateCommand(db, tx, """
-            SELECT m.id,m.depth,m.content,m.source_ref,m.created_at,m.dream_revision,m.last_recalled_at,m.created_by_model,m.seq,
-                (SELECT COUNT(*) FROM memory_roots r WHERE r.memory_id=m.id)
-            FROM memories m WHERE m.sealed=1 AND m.seq<=$max ORDER BY m.seq
-            """, ("$max", memoryMax));
-        using var reader = command.ExecuteReader();
-        var memories = new List<MemoryRecord>();
-        while (reader.Read())
-        {
-            var id = reader.GetString(0);
-            var depth = reader.GetInt32(1);
-            var content = reader.GetString(2);
-            var sourceRef = reader.IsDBNull(3) ? null : reader.GetString(3);
-            var createdAt = ParseTimestamp(reader.GetString(4));
-            var dreamRevision = reader.GetInt64(5);
-            DateTimeOffset? lastRecalledAt = reader.IsDBNull(6) ? null : ParseTimestamp(reader.GetString(6));
-            var createdByModel = reader.GetString(7);
-            var sequence = reader.GetInt64(8);
-            var uniqueSourceRootCount = reader.GetInt32(9);
-
-            if (!parentsByMemory.TryGetValue(id, out var parentIds))
-            {
-                parentIds = [];
-            }
-
-            if (!relationsByMemory.TryGetValue(id, out var relations))
-            {
-                relations = [];
-            }
-
-            memories.Add(new MemoryRecord(
-                id,
-                depth,
-                content,
-                sourceRef,
-                parentIds,
-                relations,
-                createdAt,
-                dreamRevision,
-                lastRecalledAt,
-                createdByModel,
-                uniqueSourceRootCount,
-                sequence));
-        }
-
-        return memories;
-    }
-
-    private static Dictionary<string, List<string>> ReadParentIds(
-        SqliteConnection db,
-        SqliteTransaction? tx)
-    {
-        using var command = CreateCommand(db, tx,
-            "SELECT child_id,parent_id FROM derived_from ORDER BY child_id,parent_id");
-        using var reader = command.ExecuteReader();
-        var parentsByMemory = new Dictionary<string, List<string>>(StringComparer.Ordinal);
-        while (reader.Read())
-        {
-            var childId = reader.GetString(0);
-            var parentId = reader.GetString(1);
-            if (!parentsByMemory.TryGetValue(childId, out var parentIds))
-            {
-                parentIds = [];
-                parentsByMemory.Add(childId, parentIds);
-            }
-
-            parentIds.Add(parentId);
-        }
-
-        return parentsByMemory;
-    }
-
-    private static Dictionary<string, List<MemoryRelation>> ReadRelations(
-        SqliteConnection db,
-        SqliteTransaction? tx,
-        long memoryMax,
-        long relationMax)
-    {
-        using var command = CreateCommand(db, tx, """
-            SELECT r.memory_id,r.related_memory_id,r.kind,r.related_at,r.seq
-            FROM relations r JOIN memories m ON m.id=r.related_memory_id
-            WHERE r.seq<=$max AND m.seq<=$mem ORDER BY r.seq
-            """, ("$max", relationMax), ("$mem", memoryMax));
-        using var reader = command.ExecuteReader();
-        var relationsByMemory = new Dictionary<string, List<MemoryRelation>>(StringComparer.Ordinal);
-        while (reader.Read())
-        {
-            var memoryId = reader.GetString(0);
-            var relatedMemoryId = reader.GetString(1);
-            var kind = Enum.Parse<RelationKind>(reader.GetString(2), true);
-            var relatedAt = ParseTimestamp(reader.GetString(3));
-            var sequence = reader.GetInt64(4);
-            if (!relationsByMemory.TryGetValue(memoryId, out var relations))
-            {
-                relations = [];
-                relationsByMemory.Add(memoryId, relations);
-            }
-
-            relations.Add(new MemoryRelation(relatedMemoryId, kind, relatedAt, sequence));
-        }
-
-        return relationsByMemory;
-    }
-
-    public MemoryRecord? GetMemory(string id)
-    {
-        var snapshot = ReadSnapshot();
-        foreach (var memory in snapshot.Memories)
-        {
-            if (memory.Id == id)
-            {
-                return memory;
-            }
-        }
-
-        return null;
-    }
-
-    public IReadOnlyList<MemoryRecord> GetSourceMemories(string sourceId)
-    {
-        var snapshot = ReadSnapshot();
-        return SelectSourceMemories(snapshot.Memories, sourceId);
     }
 
     public IReadOnlyList<string> LexicalSearch(
@@ -921,13 +696,6 @@ public sealed class SqliteMemoryStore : IMemoryStore
         return GetMemory(memoryId)!;
     }
 
-    public MemoryRecord? GetAppliedAbstraction(long runId, string workKey, int proposalIndex)
-    {
-        using var db = OpenConnection();
-        var id = ExecuteScalar(db, null, "SELECT id FROM memories WHERE origin_key=$origin", ("$origin", $"run:{runId}:{workKey}:{proposalIndex}")) as string;
-        return id is null ? null : GetMemory(id);
-    }
-
     public void AddRelation(RelationProposal proposal, RunRecord run, DateTimeOffset now)
     {
         if (proposal.MemoryId == proposal.RelatedMemoryId || !Enum.IsDefined(proposal.Kind))
@@ -979,19 +747,11 @@ public sealed class SqliteMemoryStore : IMemoryStore
         using var tx = db.BeginTransaction();
         if (runId is not null)
         {
-            var budgetText = ExecuteScalar(db, tx, "SELECT budget_usd FROM runs WHERE id=$id AND status='running'", ("$id", runId.Value)) as string;
-            var activeRunCount = ExecuteScalar(db, tx,
-                "SELECT COUNT(*) FROM runs WHERE id=$id AND status='running'", ("$id", runId.Value));
-            if (Convert.ToInt32(activeRunCount, CultureInfo.InvariantCulture) != 1)
-            {
-                throw new InvariantException("Cannot charge an inactive run.");
-            }
-
-            if (budgetText is not null)
+            var budgetUsd = ReadActiveRunBudgetUsd(db, tx, runId.Value);
+            if (budgetUsd is not null)
             {
                 var accountedUsd = ReadAccountedUsageUsd(db, tx, runId.Value);
-                var budgetUsd = decimal.Parse(budgetText, CultureInfo.InvariantCulture);
-                if (accountedUsd + maximumUsd > budgetUsd)
+                if (accountedUsd + maximumUsd > budgetUsd.Value)
                 {
                     throw new BudgetExceededException(
                         "Next API request's maximum cost exceeds the remaining meditation budget.");
@@ -1003,6 +763,25 @@ public sealed class SqliteMemoryStore : IMemoryStore
             ("$id", reservation.Id), ("$run", runId), ("$model", model), ("$op", operation), ("$cost", maximumUsd.ToString(CultureInfo.InvariantCulture)), ("$at", FormatTimestamp(now)));
         tx.Commit();
         return reservation;
+    }
+
+    private static decimal? ReadActiveRunBudgetUsd(
+        SqliteConnection db,
+        SqliteTransaction tx,
+        long runId)
+    {
+        using var command = CreateCommand(db, tx,
+            "SELECT budget_usd FROM runs WHERE id = $id AND status = 'running'",
+            ("$id", runId));
+        using var reader = command.ExecuteReader();
+        if (!reader.Read())
+        {
+            throw new InvariantException("Cannot charge an inactive run.");
+        }
+
+        return reader.IsDBNull(0)
+            ? null
+            : decimal.Parse(reader.GetString(0), CultureInfo.InvariantCulture);
     }
 
     public void CompleteUsage(string reservationId, ApiUsage usage, DateTimeOffset now)

@@ -174,35 +174,8 @@ public sealed class OpenAiCognition : ICognition
                 candidates = PromptMemories(candidates, [observation.Id])
             },
             schema, context, cancellationToken);
-        ProposalSchema.RequireObject(result.RootElement, "relations");
-
-        var relationItems = ProposalSchema.ReadArray(result.RootElement, "relations", maximumRelations);
-        var relations = new List<RelationProposal>(relationItems.GetArrayLength());
-        foreach (var item in relationItems.EnumerateArray())
-        {
-            ProposalSchema.RequireObject(item, "memory_id", "related_memory_id", "kind");
-            var owner = ProposalSchema.ReadText(item.GetProperty("memory_id"), 128);
-            var target = ProposalSchema.ReadText(item.GetProperty("related_memory_id"), 128);
-            var kind = ProposalSchema.ReadText(item.GetProperty("kind"), 16) switch
-            {
-                "positive" => RelationKind.Positive,
-                "negative" => RelationKind.Negative,
-                _ => throw new InvalidDataException("Unknown relation kind.")
-            };
-            if (!candidateOwnerIds.Contains(owner) || target != observation.Id)
-            {
-                throw new InvalidDataException("Assimilation proposed an unknown or reversed relation.");
-            }
-            relations.Add(new RelationProposal(owner, target, kind));
-        }
-        var seenRelations = new HashSet<RelationProposal>();
-        foreach (var relation in relations)
-        {
-            if (!seenRelations.Add(relation))
-            {
-                throw new InvalidDataException("Assimilation returned duplicate relations.");
-            }
-        }
+        var relations = ParseRelationProposals(
+            result.RootElement, candidateOwnerIds, observation.Id, maximumRelations);
         return new CognitiveResult<IReadOnlyList<RelationProposal>>(relations, result.Model);
     }
 
@@ -266,34 +239,8 @@ public sealed class OpenAiCognition : ICognition
                 sources = PromptSources(sources)
             },
             schema, context, cancellationToken);
-        ProposalSchema.RequireObject(result.RootElement, "abstractions");
-
-        var abstractionItems = ProposalSchema.ReadArray(result.RootElement, "abstractions", _engine.NeighborhoodSize);
-        var proposals = new List<AbstractionProposal>(abstractionItems.GetArrayLength());
-        foreach (var item in abstractionItems.EnumerateArray())
-        {
-            ProposalSchema.RequireObject(item, "content", "derived_from");
-            var content = ProposalSchema.ReadText(item.GetProperty("content"), _engine.MaxMemoryCharacters);
-            var parentItems = ProposalSchema.ReadArray(item, "derived_from", neighborhood.Count);
-            var parentIds = new List<string>(parentItems.GetArrayLength());
-            foreach (var parentItem in parentItems.EnumerateArray())
-            {
-                parentIds.Add(ProposalSchema.ReadText(parentItem, 128));
-            }
-            if (parentIds.Count == 0)
-            {
-                throw new InvalidDataException("Abstraction has empty, duplicate, or unknown parent IDs.");
-            }
-            var seenParentIds = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var parentId in parentIds)
-            {
-                if (!seenParentIds.Add(parentId) || !candidateParentIds.Contains(parentId))
-                {
-                    throw new InvalidDataException("Abstraction has empty, duplicate, or unknown parent IDs.");
-                }
-            }
-            proposals.Add(new AbstractionProposal(content, parentIds));
-        }
+        var proposals = ParseAbstractionProposals(
+            result.RootElement, candidateParentIds, neighborhood.Count);
         return new CognitiveResult<IReadOnlyList<AbstractionProposal>>(proposals, result.Model);
     }
 
@@ -318,6 +265,80 @@ public sealed class OpenAiCognition : ICognition
         // Known usage is charged even when the returned vector fails validation.
         AccountEmbeddingUsage(document.RootElement, reservation);
         return ParseEmbeddingVector(document.RootElement);
+    }
+
+    private static IReadOnlyList<RelationProposal> ParseRelationProposals(
+        JsonElement result,
+        IReadOnlySet<string> candidateOwnerIds,
+        string observationId,
+        int maximumRelations)
+    {
+        ProposalSchema.RequireObject(result, "relations");
+
+        var relationItems = ProposalSchema.ReadArray(result, "relations", maximumRelations);
+        var relations = new List<RelationProposal>(relationItems.GetArrayLength());
+        foreach (var item in relationItems.EnumerateArray())
+        {
+            ProposalSchema.RequireObject(item, "memory_id", "related_memory_id", "kind");
+            var owner = ProposalSchema.ReadText(item.GetProperty("memory_id"), 128);
+            var target = ProposalSchema.ReadText(item.GetProperty("related_memory_id"), 128);
+            var kind = ProposalSchema.ReadText(item.GetProperty("kind"), 16) switch
+            {
+                "positive" => RelationKind.Positive,
+                "negative" => RelationKind.Negative,
+                _ => throw new InvalidDataException("Unknown relation kind.")
+            };
+            if (!candidateOwnerIds.Contains(owner) || target != observationId)
+            {
+                throw new InvalidDataException("Assimilation proposed an unknown or reversed relation.");
+            }
+            relations.Add(new RelationProposal(owner, target, kind));
+        }
+        var seenRelations = new HashSet<RelationProposal>();
+        foreach (var relation in relations)
+        {
+            if (!seenRelations.Add(relation))
+            {
+                throw new InvalidDataException("Assimilation returned duplicate relations.");
+            }
+        }
+        return relations;
+    }
+
+    private IReadOnlyList<AbstractionProposal> ParseAbstractionProposals(
+        JsonElement result,
+        IReadOnlySet<string> candidateParentIds,
+        int maximumParents)
+    {
+        ProposalSchema.RequireObject(result, "abstractions");
+
+        var abstractionItems = ProposalSchema.ReadArray(result, "abstractions", _engine.NeighborhoodSize);
+        var proposals = new List<AbstractionProposal>(abstractionItems.GetArrayLength());
+        foreach (var item in abstractionItems.EnumerateArray())
+        {
+            ProposalSchema.RequireObject(item, "content", "derived_from");
+            var content = ProposalSchema.ReadText(item.GetProperty("content"), _engine.MaxMemoryCharacters);
+            var parentItems = ProposalSchema.ReadArray(item, "derived_from", maximumParents);
+            var parentIds = new List<string>(parentItems.GetArrayLength());
+            foreach (var parentItem in parentItems.EnumerateArray())
+            {
+                parentIds.Add(ProposalSchema.ReadText(parentItem, 128));
+            }
+            if (parentIds.Count == 0)
+            {
+                throw new InvalidDataException("Abstraction has empty, duplicate, or unknown parent IDs.");
+            }
+            var seenParentIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var parentId in parentIds)
+            {
+                if (!seenParentIds.Add(parentId) || !candidateParentIds.Contains(parentId))
+                {
+                    throw new InvalidDataException("Abstraction has empty, duplicate, or unknown parent IDs.");
+                }
+            }
+            proposals.Add(new AbstractionProposal(content, parentIds));
+        }
+        return proposals;
     }
 
     private async Task<ParsedResponse> RespondAsync(CognitionRole role, string operation, string prompt,
@@ -387,7 +408,11 @@ public sealed class OpenAiCognition : ICognition
 
     private void AccountResponseUsage(JsonElement response, ModelOptions model, UsageReservation reservation)
     {
-        var usage = response.GetProperty("usage");
+        if (response.ValueKind != JsonValueKind.Object ||
+            !response.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException("OpenAI returned missing or invalid token usage; usage reservation is retained.");
+        }
         var inputTokens = RequiredTokens(usage, "input_tokens");
         var outputTokens = RequiredTokens(usage, "output_tokens");
         var cachedTokens = 0L;
@@ -404,7 +429,11 @@ public sealed class OpenAiCognition : ICognition
 
     private void AccountEmbeddingUsage(JsonElement response, UsageReservation reservation)
     {
-        var usage = response.GetProperty("usage");
+        if (response.ValueKind != JsonValueKind.Object ||
+            !response.TryGetProperty("usage", out var usage) || usage.ValueKind != JsonValueKind.Object)
+        {
+            throw new InvalidDataException("OpenAI returned missing or invalid token usage; usage reservation is retained.");
+        }
         var tokens = RequiredTokens(usage, "prompt_tokens");
         var costUsd = tokens * _options.EmbeddingInputUsdPerMillion / 1_000_000m;
         var accountedUsage = new ApiUsage(tokens, 0, 0, costUsd);
@@ -413,7 +442,9 @@ public sealed class OpenAiCognition : ICognition
 
     private static ParsedResponse ParseStructuredResponse(JsonElement response)
     {
-        if (!response.TryGetProperty("status", out var status) || status.GetString() != "completed")
+        if (response.ValueKind != JsonValueKind.Object ||
+            !response.TryGetProperty("status", out var status) ||
+            status.ValueKind != JsonValueKind.String || status.GetString() != "completed")
         {
             throw new InvalidDataException("OpenAI response did not complete; no proposal was applied.");
         }
@@ -430,26 +461,54 @@ public sealed class OpenAiCognition : ICognition
         var texts = new List<string>();
         foreach (var item in items.EnumerateArray())
         {
-            if (item.TryGetProperty("type", out var itemType) && itemType.GetString() == "refusal")
+            if (item.ValueKind != JsonValueKind.Object)
             {
-                throw new InvalidDataException("OpenAI refused this cognitive operation.");
+                throw new InvalidDataException("OpenAI response contains an invalid output item.");
             }
-            if (!item.TryGetProperty("content", out var blocks) || blocks.ValueKind != JsonValueKind.Array)
+            if (item.TryGetProperty("type", out var itemType))
+            {
+                if (itemType.ValueKind != JsonValueKind.String)
+                {
+                    throw new InvalidDataException("OpenAI response contains an invalid output item.");
+                }
+                if (itemType.GetString() == "refusal")
+                {
+                    throw new InvalidDataException("OpenAI refused this cognitive operation.");
+                }
+            }
+            if (!item.TryGetProperty("content", out var blocks))
             {
                 continue;
             }
+            if (blocks.ValueKind != JsonValueKind.Array)
+            {
+                throw new InvalidDataException("OpenAI response contains invalid output content.");
+            }
+
             foreach (var block in blocks.EnumerateArray())
             {
+                if (block.ValueKind != JsonValueKind.Object)
+                {
+                    throw new InvalidDataException("OpenAI response contains an invalid output block.");
+                }
                 if (!block.TryGetProperty("type", out var type))
                 {
                     continue;
+                }
+                if (type.ValueKind != JsonValueKind.String)
+                {
+                    throw new InvalidDataException("OpenAI response contains an invalid output block.");
                 }
                 if (type.GetString() == "refusal")
                 {
                     throw new InvalidDataException("OpenAI refused this cognitive operation.");
                 }
-                if (type.GetString() == "output_text" && block.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String)
+                if (type.GetString() == "output_text")
                 {
+                    if (!block.TryGetProperty("text", out var text) || text.ValueKind != JsonValueKind.String)
+                    {
+                        throw new InvalidDataException("OpenAI response contains invalid output text.");
+                    }
                     texts.Add(text.GetString()!);
                 }
             }
@@ -470,13 +529,23 @@ public sealed class OpenAiCognition : ICognition
 
     private EmbeddingVector ParseEmbeddingVector(JsonElement response)
     {
-        if (!response.TryGetProperty("model", out var model) || model.GetString() != _options.EmbeddingModel)
+        if (response.ValueKind != JsonValueKind.Object ||
+            !response.TryGetProperty("model", out var model) ||
+            model.ValueKind != JsonValueKind.String || model.GetString() != _options.EmbeddingModel)
         {
             throw new InvalidDataException("Embedding response uses a different model.");
         }
-        if (!response.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array || data.GetArrayLength() != 1 ||
-            !data[0].TryGetProperty("index", out var index) || index.GetInt32() != 0 ||
-            !data[0].TryGetProperty("embedding", out var vector) || vector.ValueKind != JsonValueKind.Array ||
+        if (!response.TryGetProperty("data", out var data) ||
+            data.ValueKind != JsonValueKind.Array || data.GetArrayLength() != 1)
+        {
+            throw new InvalidDataException("OpenAI returned an invalid embedding shape.");
+        }
+
+        var embeddingEntry = data[0];
+        if (embeddingEntry.ValueKind != JsonValueKind.Object ||
+            !embeddingEntry.TryGetProperty("index", out var index) || index.ValueKind != JsonValueKind.Number ||
+            !index.TryGetInt32(out var entryIndex) || entryIndex != 0 ||
+            !embeddingEntry.TryGetProperty("embedding", out var vector) || vector.ValueKind != JsonValueKind.Array ||
             vector.GetArrayLength() != _options.EmbeddingDimensions)
         {
             throw new InvalidDataException("OpenAI returned an invalid embedding shape.");
@@ -486,7 +555,11 @@ public sealed class OpenAiCognition : ICognition
         var valueIndex = 0;
         foreach (var value in vector.EnumerateArray())
         {
-            values[valueIndex] = value.GetSingle();
+            if (value.ValueKind != JsonValueKind.Number || !value.TryGetSingle(out var component))
+            {
+                throw new InvalidDataException("OpenAI returned an invalid embedding vector.");
+            }
+            values[valueIndex] = component;
             valueIndex++;
         }
         var hasNonzeroValue = false;
@@ -557,7 +630,9 @@ public sealed class OpenAiCognition : ICognition
 
     private static long RequiredTokens(JsonElement usage, string name)
     {
-        if (!usage.TryGetProperty(name, out var value) || !value.TryGetInt64(out var tokens) || tokens < 0)
+        if (usage.ValueKind != JsonValueKind.Object ||
+            !usage.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.Number ||
+            !value.TryGetInt64(out var tokens) || tokens < 0)
         {
             throw new InvalidDataException("OpenAI returned missing or invalid token usage; usage reservation is retained.");
         }

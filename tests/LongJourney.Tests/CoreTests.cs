@@ -222,6 +222,46 @@ public sealed class CoreTests
     }
 
     [Fact]
+    public async Task SourceReadsKeepTheirOwnRowsAndOutgoingRelationsToOtherSources()
+    {
+        using var fixture = new Fixture(maxObservations: 2);
+        fixture.Cognition.ObservationCount = 2;
+        var selectedSource = await fixture.Engine.RememberAsync("selected source");
+        var otherSource = await fixture.Engine.RememberAsync("other source");
+        var owner = selectedSource.Memories[0];
+        var sibling = selectedSource.Memories[1];
+        var outsideTarget = otherSource.Memories[0];
+        var run = fixture.Run(1);
+        var recalledAt = Day.AddHours(2);
+
+        fixture.Store.AddRelation(
+            new RelationProposal(owner.Id, outsideTarget.Id, RelationKind.Positive), run, Day.AddHours(1));
+        fixture.Store.AddRelation(
+            new RelationProposal(outsideTarget.Id, sibling.Id, RelationKind.Negative), run, Day.AddHours(1));
+        fixture.Store.RecordRecall([owner.Id, outsideTarget.Id], recalledAt);
+
+        var memories = fixture.Store.GetSourceMemories(selectedSource.SourceId);
+        Assert.Equal(new[] { owner.Id, sibling.Id }, MemoryTestData.Ids(memories));
+        Assert.Equal(outsideTarget.Id, Assert.Single(memories[0].Relations).RelatedMemoryId);
+        Assert.Equal(recalledAt, memories[0].LastRecalledAt);
+        Assert.Empty(memories[1].Relations);
+        Assert.All(memories, memory => Assert.Equal(1, memory.UniqueSourceRootCount));
+
+        var pointRead = fixture.Store.GetMemory(owner.Id)!;
+        Assert.Equal(owner.Content, pointRead.Content);
+        Assert.Equal(recalledAt, pointRead.LastRecalledAt);
+        Assert.Equal(outsideTarget.Id, Assert.Single(pointRead.Relations).RelatedMemoryId);
+
+        var duplicate = fixture.Store.ReadRememberResult(selectedSource.SourceId, true);
+        Assert.True(duplicate.Duplicate);
+        Assert.Equal("complete", duplicate.Status);
+        Assert.Equal(MemoryTestData.Ids(memories), MemoryTestData.Ids(duplicate.Memories));
+        Assert.Equal(outsideTarget.Id, Assert.Single(duplicate.Memories[0].Relations).RelatedMemoryId);
+        Assert.Null(fixture.Store.GetMemory("missing-memory"));
+        Assert.Empty(fixture.Store.GetSourceMemories("missing-source"));
+    }
+
+    [Fact]
     public async Task ContentAndProvenanceCannotBeMutatedAfterBirth()
     {
         using var fixture = new Fixture();
@@ -432,7 +472,7 @@ public sealed class CoreTests
             return Store.GetOrCreateRun(RunKind.Dream, start, end, end, null);
         }
 
-        public MemoryRecord Add(RunRecord run, string key, string[] parents)
+        public MemoryRecord Add(RunRecord run, string key, IReadOnlyList<string> parents)
         {
             var proposal = new AbstractionProposal("provisional " + key, parents);
             var embedding = new EmbeddingVector("test:3", [1, 1, 1]);

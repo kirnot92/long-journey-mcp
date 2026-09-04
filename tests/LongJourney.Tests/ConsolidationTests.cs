@@ -40,7 +40,7 @@ public sealed class ConsolidationTests
         var work = fixture.Store.GetWorkItems(run.Id);
         Assert.Equal("complete", summary.Status);
         var expectedAssimilationIds = MemoryTestData.Ids(fresh);
-        Array.Sort(expectedAssimilationIds);
+        expectedAssimilationIds.Sort();
         Assert.Equal(expectedAssimilationIds, SortedWorkMemoryIds(work, "assimilation"));
 
         var expectedConsolidationIds = new List<string>(expectedAssimilationIds) { recalled.Id };
@@ -264,7 +264,7 @@ public sealed class ConsolidationTests
         Assert.Empty(fixture.Store.GetRuns());
     }
 
-    private static string[] SortedWorkMemoryIds(IReadOnlyList<RunWorkItem> work, string? phase = null)
+    private static IReadOnlyList<string> SortedWorkMemoryIds(IReadOnlyList<RunWorkItem> work, string? phase = null)
     {
         var memoryIds = new List<string>();
         foreach (var item in work)
@@ -276,6 +276,6 @@ public sealed class ConsolidationTests
         }
 
         memoryIds.Sort();
-        return memoryIds.ToArray();
+        return memoryIds;
     }
 }

@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using LongJourney.Core;
 using LongJourney.OpenAI;
 
@@ -195,6 +196,77 @@ public sealed class OpenAiCognitionTests
             "{\"model\":\"text-embedding-3-large\",\"data\":[{\"index\":0,\"embedding\":" + vector + "}],\"usage\":{\"prompt_tokens\":12}}"))));
         await Assert.ThrowsAsync<InvalidDataException>(() => Client(http, ledger, new() { EmbeddingDimensions = 3 }).EmbedAsync("experience", new(14), default));
         Assert.Single(ledger.Completed);
+    }
+
+    [Theory]
+    [InlineData("""{"status":17,"model":"gpt-5.6-terra","output":[]}""")]
+    [InlineData("""{"status":"completed","model":"gpt-5.6-terra","output":["unexpected item"]}""")]
+    public async Task MalformedSuccessfulEnvelopeIsRejectedAfterKnownUsageIsSettled(string envelope)
+    {
+        var ledger = new Ledger();
+        var body = JsonNode.Parse(envelope)!.AsObject();
+        body["usage"] = new JsonObject
+        {
+            ["input_tokens"] = 100,
+            ["output_tokens"] = 20
+        };
+        using var handler = new Handler(_ => Task.FromResult(JsonResponse(body.ToJsonString())));
+        using var http = new HttpClient(handler);
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => Client(http, ledger).ExtractAsync("experience", new(25), default));
+
+        Assert.Single(ledger.Reservations);
+        Assert.True(Assert.Single(ledger.Completed).Usage.CostUsd > 0);
+        Assert.Equal(1, handler.CallCount);
+    }
+
+    [Theory]
+    [InlineData("""[{"index":"0","embedding":[0.1,0.2,0.3]}]""")]
+    [InlineData("""[{"index":0,"embedding":[0.1,"not a number",0.3]}]""")]
+    public async Task MalformedEmbeddingDataIsRejectedAfterKnownUsageIsSettled(string data)
+    {
+        var ledger = new Ledger();
+        var body = new JsonObject
+        {
+            ["model"] = "text-embedding-3-large",
+            ["data"] = JsonNode.Parse(data),
+            ["usage"] = new JsonObject { ["prompt_tokens"] = 12 }
+        };
+        using var handler = new Handler(_ => Task.FromResult(JsonResponse(body.ToJsonString())));
+        using var http = new HttpClient(handler);
+        var client = Client(http, ledger, new OpenAiOptions { EmbeddingDimensions = 3 });
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => client.EmbedAsync("experience", new(26), default));
+
+        Assert.Single(ledger.Reservations);
+        Assert.Equal(0.00000156m, Assert.Single(ledger.Completed).Usage.CostUsd);
+        Assert.Equal(1, handler.CallCount);
+    }
+
+    [Theory]
+    [InlineData("[]")]
+    [InlineData("""{"input_tokens":"100","output_tokens":20}""")]
+    public async Task MalformedRequiredUsageRetainsReservationWithoutRetry(string usage)
+    {
+        var ledger = new Ledger();
+        var body = new JsonObject
+        {
+            ["status"] = "completed",
+            ["model"] = "gpt-5.6-terra",
+            ["output"] = new JsonArray(),
+            ["usage"] = JsonNode.Parse(usage)
+        };
+        using var handler = new Handler(_ => Task.FromResult(JsonResponse(body.ToJsonString())));
+        using var http = new HttpClient(handler);
+
+        await Assert.ThrowsAsync<InvalidDataException>(
+            () => Client(http, ledger).ExtractAsync("experience", new(27), default));
+
+        Assert.Single(ledger.Reservations);
+        Assert.Empty(ledger.Completed);
+        Assert.Equal(1, handler.CallCount);
     }
 
     [Fact]

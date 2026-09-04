@@ -15,6 +15,12 @@ public sealed class MemorySearch(
         int? depth = null,
         int? limit = null)
     {
+        var resultLimit = limit ?? options.SearchCandidates;
+        if (resultLimit <= 0)
+        {
+            return [];
+        }
+
         snapshot ??= store.ReadSnapshot();
         var candidates = FindCandidates(snapshot, depth);
         if (candidates.Count == 0)
@@ -22,14 +28,13 @@ public sealed class MemorySearch(
             return [];
         }
 
-        await GenerateAndSaveMissingEmbeddingsAsync(candidates, context, cancellationToken);
+        var embeddings = await LoadAndGenerateEmbeddingsAsync(candidates, context, cancellationToken);
         var queryVector = await cognition.EmbedAsync(query, context, cancellationToken);
         ValidateEmbeddingSpace(queryVector);
 
-        var resultLimit = limit ?? options.SearchCandidates;
         var candidatesById = depth is null ? snapshot.ById : BuildCandidateIndex(candidates);
         var lexicalRanking = ReadLexicalRanking(query, candidatesById, snapshot, depth, resultLimit);
-        var semanticRanking = ReadSemanticRanking(queryVector, candidatesById, resultLimit);
+        var semanticRanking = RankBySimilarity(queryVector, embeddings, candidatesById, resultLimit);
         return MergeRankings(lexicalRanking, semanticRanking, candidatesById, resultLimit);
     }
 
@@ -41,6 +46,12 @@ public sealed class MemorySearch(
         int? depth = null,
         int? limit = null)
     {
+        var resultLimit = limit ?? options.NeighborhoodSize;
+        if (resultLimit <= 0)
+        {
+            return [];
+        }
+
         var candidates = FindCandidates(snapshot, depth, seed.Id);
         if (candidates.Count == 0)
         {
@@ -50,11 +61,11 @@ public sealed class MemorySearch(
         var memoriesToEmbed = new List<MemoryRecord>(candidates.Count + 1);
         memoriesToEmbed.AddRange(candidates);
         memoriesToEmbed.Add(seed);
-        await GenerateAndSaveMissingEmbeddingsAsync(memoriesToEmbed, context, cancellationToken);
+        var embeddings = await LoadAndGenerateEmbeddingsAsync(memoriesToEmbed, context, cancellationToken);
 
-        var seedVector = store.GetEmbedding(seed.Id, cognition.EmbeddingSpace)!;
+        var seedVector = embeddings[seed.Id];
         var candidatesById = BuildCandidateIndex(candidates);
-        var rankedIds = ReadSemanticRanking(seedVector, candidatesById, limit ?? options.NeighborhoodSize);
+        var rankedIds = RankBySimilarity(seedVector, embeddings, candidatesById, resultLimit);
         var results = new List<MemoryRecord>();
         foreach (var memoryId in rankedIds)
         {
@@ -64,13 +75,13 @@ public sealed class MemorySearch(
         return results;
     }
 
-    public Task ReindexAsync(CallContext context, CancellationToken cancellationToken)
+    public async Task ReindexAsync(CallContext context, CancellationToken cancellationToken)
     {
         var snapshot = store.ReadSnapshot();
-        return GenerateAndSaveMissingEmbeddingsAsync(snapshot.Memories, context, cancellationToken);
+        await LoadAndGenerateEmbeddingsAsync(snapshot.Memories, context, cancellationToken);
     }
 
-    private async Task GenerateAndSaveMissingEmbeddingsAsync(
+    private async Task<IReadOnlyDictionary<string, EmbeddingVector>> LoadAndGenerateEmbeddingsAsync(
         IReadOnlyList<MemoryRecord> memories,
         CallContext context,
         CancellationToken cancellationToken)
@@ -78,16 +89,18 @@ public sealed class MemorySearch(
         await embeddingGenerationGate.WaitAsync(cancellationToken);
         try
         {
-            var embeddedIds = new HashSet<string>(StringComparer.Ordinal);
+            // Keep this operation's vectors for ranking as well as finding missing embeddings.
+            // A later search loads a fresh view from the store.
+            var embeddings = new Dictionary<string, EmbeddingVector>(StringComparer.Ordinal);
             foreach (var storedEmbedding in store.GetEmbeddings(cognition.EmbeddingSpace))
             {
-                embeddedIds.Add(storedEmbedding.MemoryId);
+                embeddings.Add(storedEmbedding.MemoryId, storedEmbedding.Embedding);
             }
 
             foreach (var memory in memories)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (embeddedIds.Contains(memory.Id))
+                if (embeddings.ContainsKey(memory.Id))
                 {
                     continue;
                 }
@@ -96,8 +109,10 @@ public sealed class MemorySearch(
                 var vector = await cognition.EmbedAsync(memory.Content, context, cancellationToken);
                 ValidateEmbeddingSpace(vector);
                 store.SaveEmbedding(memory.Id, vector);
-                embeddedIds.Add(memory.Id);
+                embeddings.Add(memory.Id, vector);
             }
+
+            return embeddings;
         }
         finally
         {
@@ -136,27 +151,22 @@ public sealed class MemorySearch(
         return rankedIds;
     }
 
-    private IReadOnlyList<string> ReadSemanticRanking(
+    private static IReadOnlyList<string> RankBySimilarity(
         EmbeddingVector query,
+        IReadOnlyDictionary<string, EmbeddingVector> embeddings,
         IReadOnlyDictionary<string, MemoryRecord> candidatesById,
         int limit)
     {
-        var storedEmbeddings = store.GetEmbeddings(cognition.EmbeddingSpace);
-        if (limit <= 0)
-        {
-            return [];
-        }
-
         var scores = new List<MemoryScore>();
-        foreach (var storedEmbedding in storedEmbeddings)
+        foreach (var embedding in embeddings)
         {
-            if (!candidatesById.ContainsKey(storedEmbedding.MemoryId))
+            if (!candidatesById.ContainsKey(embedding.Key))
             {
                 continue;
             }
 
-            var similarity = Cosine(query.Values, storedEmbedding.Embedding.Values);
-            scores.Add(new MemoryScore(storedEmbedding.MemoryId, similarity));
+            var similarity = Cosine(query.Values, embedding.Value.Values);
+            scores.Add(new MemoryScore(embedding.Key, similarity));
         }
         scores.Sort(CompareScores);
 

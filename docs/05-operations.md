@@ -50,6 +50,8 @@ dotnet run --project src/LongJourney.Server -- --Server:Port=5088 --Engine:DataD
 }
 ```
 
+서버 시작 시 잘못된 설정은 해당 Engine 설정명을 포함한 오류로 거부한다. DataDirectory는 빈 문자열이나 공백일 수 없으며, SchedulerPollSeconds의 허용 범위는 1~4,294,967초다. 데이터 경로를 해석하거나 corpus 파일을 만들기 전에 검증한다.
+
 문자·개수 제한과 탐색 크기는 변경 가능한 구현 기본값이다. 상한을 초과한 raw를 임의로 자르지 않고 입력 오류를 반환한다. 1개를 기본으로 하는 observation 상한도 설정값이며, 고정된 Core invariant로 새로 도입한 것은 아니다. Source 하나는 observation 개수와 관계없이 root 하나로 센다.
 
 Core invariant는 모든 생성 경로에서 강제한다. 같은 바로 아래 depth의 부모가 최소 B개 있어야 하고, 서로 다른 Source root의 합집합이 `B^depth` 이상이어야 한다. `RootBase`는 신규 corpus에서 선택하며 기존 corpus의 값을 설정만 바꿔 변경할 수 없다. 원문·content·부모 provenance는 생성 뒤 수정하지 않는다.

@@ -1,0 +1,165 @@
+using System.Net;
+using System.Net.Http.Json;
+using System.Text.Json;
+using LongJourney.Core;
+using LongJourney.Server;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Hosting.Server;
+using Microsoft.AspNetCore.Hosting.Server.Features;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+
+namespace LongJourney.Tests;
+
+public sealed class ServerTests
+{
+    [Fact]
+    public async Task HttpMcpExposesOnlyThreeToolsAndPersistsSharedMemoryWithSnakeCaseResults()
+    {
+        await using var host = await RunningHost.StartAsync();
+        var initialized = await host.RpcAsync("initialize", new
+        {
+            protocolVersion = "2025-11-25", capabilities = new { },
+            clientInfo = new { name = "long-journey-tests", version = "1.0" }
+        });
+        Assert.True(initialized.TryGetProperty("result", out _), initialized.ToString());
+
+        var listed = await host.RpcAsync("tools/list", new { });
+        var tools = listed.GetProperty("result").GetProperty("tools").EnumerateArray().ToArray();
+        Assert.Equal(new[] { "recall", "remember", "trace" }, tools.Select(x => x.GetProperty("name").GetString()).Order().ToArray());
+        var rememberTool = tools.Single(x => x.GetProperty("name").GetString() == "remember");
+        Assert.Equal(new[] { "raw" }, rememberTool.GetProperty("inputSchema").GetProperty("properties").EnumerateObject().Select(x => x.Name).ToArray());
+        var traceTool = tools.Single(x => x.GetProperty("name").GetString() == "trace");
+        Assert.True(traceTool.GetProperty("inputSchema").GetProperty("properties").TryGetProperty("memory_id", out _));
+
+        const string raw = "오늘 C#으로 기억 서버를 작성했다.";
+        var remembered = Structured(await host.RpcAsync("tools/call", new { name = "remember", arguments = new { raw } }));
+        var sourceId = remembered.GetProperty("source_id").GetString();
+        var memory = remembered.GetProperty("memories")[0];
+        var memoryId = memory.GetProperty("id").GetString()!;
+        Assert.Equal(0, memory.GetProperty("depth").GetInt32());
+        Assert.True(memory.TryGetProperty("created_at", out _));
+        Assert.False(remembered.GetProperty("duplicate").GetBoolean());
+
+        // A new HTTP client shares the same corpus; raw equality is checked before cognition.
+        using var secondClient = new HttpClient { BaseAddress = host.Client.BaseAddress };
+        var duplicated = Structured(await host.RpcAsync("tools/call", new { name = "remember", arguments = new { raw } }, secondClient));
+        Assert.True(duplicated.GetProperty("duplicate").GetBoolean());
+        Assert.Equal(sourceId, duplicated.GetProperty("source_id").GetString());
+        Assert.Equal(1, host.Cognition.Extractions);
+
+        var recalled = Structured(await host.RpcAsync("tools/call", new { name = "recall", arguments = new { query = "기억 서버", context = "오늘 작업" } }));
+        Assert.Equal(memoryId, recalled.GetProperty("memories")[0].GetProperty("id").GetString());
+        Assert.NotEqual(JsonValueKind.Null, recalled.GetProperty("memories")[0].GetProperty("last_recalled_at").ValueKind);
+        var traced = Structured(await host.RpcAsync("tools/call", new { name = "trace", arguments = new { memory_id = memoryId } }));
+        Assert.Equal(raw, traced.GetProperty("sources")[0].GetProperty("raw").GetString());
+        Assert.Equal(memoryId, traced.GetProperty("memory_id").GetString());
+    }
+
+    [Fact]
+    public async Task RejectsCrossOriginRequestsAndInvalidHostAndProtectsCorpusOwnership()
+    {
+        await using var host = await RunningHost.StartAsync();
+        using var crossOrigin = new HttpRequestMessage(HttpMethod.Post, "mcp");
+        crossOrigin.Headers.Add("Origin", "https://untrusted.example");
+        crossOrigin.Content = JsonContent.Create(new { jsonrpc = "2.0", id = 1, method = "tools/list" });
+        using var blocked = await host.Client.SendAsync(crossOrigin);
+        Assert.Equal(HttpStatusCode.Forbidden, blocked.StatusCode);
+
+        using var wrongHost = new HttpRequestMessage(HttpMethod.Post, "mcp");
+        wrongHost.Headers.Host = "untrusted.example";
+        wrongHost.Content = JsonContent.Create(new { jsonrpc = "2.0", id = 2, method = "tools/list" });
+        using var rejectedHost = await host.Client.SendAsync(wrongHost);
+        Assert.True(rejectedHost.StatusCode is HttpStatusCode.BadRequest or HttpStatusCode.Forbidden);
+        Assert.Throws<InputException>(() => AppHost.Build([], builder => RunningHost.Configure(builder, host.DirectoryPath, new CannedCognition())));
+
+        using var sameOrigin = new HttpClient { BaseAddress = host.Client.BaseAddress };
+        sameOrigin.DefaultRequestHeaders.Add("Origin", host.Client.BaseAddress!.GetLeftPart(UriPartial.Authority));
+        var allowed = await host.RpcAsync("tools/list", new { }, sameOrigin);
+        Assert.True(allowed.TryGetProperty("result", out _), allowed.ToString());
+    }
+
+    private static JsonElement Structured(JsonElement response)
+    {
+        Assert.True(response.TryGetProperty("result", out var result), response.ToString());
+        Assert.False(result.TryGetProperty("isError", out var error) && error.GetBoolean(), result.ToString());
+        return result.GetProperty("structuredContent");
+    }
+
+    private sealed class RunningHost : IAsyncDisposable
+    {
+        public required WebApplication App { get; init; }
+        public required HttpClient Client { get; init; }
+        public required string DirectoryPath { get; init; }
+        public required CannedCognition Cognition { get; init; }
+        private int sequence;
+
+        public static async Task<RunningHost> StartAsync()
+        {
+            var directory = Path.Combine(Path.GetTempPath(), "long-journey-http-" + Guid.NewGuid().ToString("N"));
+            var cognition = new CannedCognition();
+            var app = AppHost.Build([], builder => Configure(builder, directory, cognition));
+            await app.StartAsync();
+            var address = app.Services.GetRequiredService<IServer>().Features.Get<IServerAddressesFeature>()!.Addresses.Single();
+            return new RunningHost
+            {
+                App = app, DirectoryPath = directory, Cognition = cognition,
+                Client = new HttpClient { BaseAddress = new Uri(address + "/"), Timeout = TimeSpan.FromSeconds(20) }
+            };
+        }
+
+        public static void Configure(WebApplicationBuilder builder, string directory, CannedCognition cognition)
+        {
+            builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["Engine:DataDirectory"] = directory,
+                ["Engine:SchedulerEnabled"] = "false",
+                ["Server:Port"] = "0"
+            });
+            builder.Services.AddSingleton<ICognition>(cognition);
+        }
+
+        public async Task<JsonElement> RpcAsync(string method, object parameters, HttpClient? client = null)
+        {
+            using var request = new HttpRequestMessage(HttpMethod.Post, "mcp");
+            request.Headers.Add("Accept", "application/json, text/event-stream");
+            request.Headers.Add("MCP-Protocol-Version", "2025-11-25");
+            request.Content = JsonContent.Create(new { jsonrpc = "2.0", id = Interlocked.Increment(ref sequence), method, @params = parameters });
+            using var response = await (client ?? Client).SendAsync(request);
+            var text = await response.Content.ReadAsStringAsync();
+            Assert.True(response.IsSuccessStatusCode, $"HTTP {(int)response.StatusCode}: {text}");
+            if (response.Content.Headers.ContentType?.MediaType == "text/event-stream")
+                text = string.Join("\n", text.Split('\n').Where(x => x.StartsWith("data:", StringComparison.Ordinal)).Select(x => x[5..].TrimStart()));
+            using var json = JsonDocument.Parse(text);
+            return json.RootElement.Clone();
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            Client.Dispose();
+            await App.StopAsync();
+            await App.DisposeAsync();
+            // directory is an absolute, unique child created by this test under the temp workspace.
+            Directory.Delete(DirectoryPath, recursive: true);
+        }
+    }
+
+    private sealed class CannedCognition : ICognition
+    {
+        public int Extractions { get; private set; }
+        public string EmbeddingSpace => "test-http:3";
+        public Task<CognitiveResult<IReadOnlyList<ObservationProposal>>> ExtractAsync(string raw, CallContext context, CancellationToken cancellationToken)
+        {
+            Extractions++;
+            return Task.FromResult(new CognitiveResult<IReadOnlyList<ObservationProposal>>([new(raw)], "test-http"));
+        }
+        public Task<EmbeddingVector> EmbedAsync(string text, CallContext context, CancellationToken cancellationToken)
+            => Task.FromResult(new EmbeddingVector(EmbeddingSpace, [1f, 1f, 1f]));
+        public Task<CognitiveResult<IReadOnlyList<string>>> SelectAsync(string query, string? context, IReadOnlyList<MemoryRecord> candidates, CallContext call, CancellationToken cancellationToken)
+            => Task.FromResult(new CognitiveResult<IReadOnlyList<string>>(candidates.Select(x => x.Id).ToArray(), "test-http"));
+        public Task<CognitiveResult<IReadOnlyList<RelationProposal>>> AssimilateAsync(MemoryRecord observation, IReadOnlyList<MemoryRecord> candidates, CallContext context, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("Scheduler is disabled for HTTP tests.");
+        public Task<CognitiveResult<IReadOnlyList<AbstractionProposal>>> AbstractAsync(IReadOnlyList<MemoryRecord> neighborhood, IReadOnlyList<SourceArtifact> sources, CognitionRole role, CallContext context, CancellationToken cancellationToken)
+            => throw new InvalidOperationException("Scheduler is disabled for HTTP tests.");
+    }
+}

@@ -1,0 +1,10 @@
+**/bin/
+**/obj/
+.vs/
+data/
+.packages/
+.dotnet/
+TestResults/
+appsettings.Local.json
+.env
+*.user

@@ -1,0 +1,10 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/LongJourney.Core/LongJourney.Core.csproj" />
+    <Project Path="src/LongJourney.OpenAI/LongJourney.OpenAI.csproj" />
+    <Project Path="src/LongJourney.Server/LongJourney.Server.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/LongJourney.Tests/LongJourney.Tests.csproj" />
+  </Folder>
+</Solution>

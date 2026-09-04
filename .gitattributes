@@ -1,0 +1,3 @@
+# Preserve supplied design artifacts byte-for-byte, including their line endings.
+docs/01-initial-design.md -text
+docs/04-openai-api.md -text

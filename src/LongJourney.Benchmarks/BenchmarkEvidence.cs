@@ -5,18 +5,17 @@ using LongJourney.Core;
 
 namespace LongJourney.Benchmarks;
 
-public sealed record SourceSession(string SourceId, string SessionId, int TurnIndex, int PartIndex);
+public sealed record SourceSession(string SourceId, string SessionId);
 
 public static class BenchmarkEvidence
 {
     public static IReadOnlyList<SourceSession> MapSources(BenchmarkHistory history)
     {
         var mappings = new List<SourceSession>();
-        foreach (var observation in history.Observations)
+        foreach (var session in history.Sessions)
         {
-            var hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(observation.Raw)));
-            mappings.Add(new SourceSession("src_" + hash, observation.SessionId,
-                observation.TurnIndex, observation.PartIndex));
+            var hash = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(session.Raw)));
+            mappings.Add(new SourceSession("src_" + hash, session.SessionId));
         }
         return mappings;
     }

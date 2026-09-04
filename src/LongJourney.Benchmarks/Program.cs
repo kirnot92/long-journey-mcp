@@ -47,7 +47,7 @@ public static class Program
                     {
                         id = item.Id,
                         turns = item.History.Turns.Count,
-                        observations = item.History.Observations.Count,
+                        sessions = item.History.Sessions.Count,
                         valid_timeline = valid
                     });
                 }

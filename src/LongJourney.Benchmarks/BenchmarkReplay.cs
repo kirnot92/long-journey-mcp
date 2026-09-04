@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 using LongJourney.Core;
 
 namespace LongJourney.Benchmarks;
@@ -9,10 +10,11 @@ public sealed class ReplayClock(DateTimeOffset initialTime) : TimeProvider
     public override DateTimeOffset GetUtcNow() => Now;
 }
 
+[JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class BenchmarkProgress
 {
     public DateTimeOffset Clock { get; set; }
-    public int NextObservation { get; set; }
+    public int NextSession { get; set; }
     public bool IngestionComplete { get; set; }
     public IReadOnlyList<string>? RecalledIds { get; set; }
     public IReadOnlyList<AnswerEvidence>? Evidence { get; set; }
@@ -42,18 +44,18 @@ public sealed class BenchmarkReplay(
         {
             return;
         }
-        while (progress.NextObservation < history.Observations.Count)
+        while (progress.NextSession < history.Sessions.Count)
         {
-            var observation = history.Observations[progress.NextObservation];
-            await AdvanceAsync(observation.At, cancellationToken);
+            var session = history.Sessions[progress.NextSession];
+            await AdvanceAsync(session.At, cancellationToken);
             // A failed extraction is retried through remember at this event's original clock.
             // Completed sources are deduplicated if the process died before saving the cursor.
-            var result = await memory.RememberAsync(observation.Raw, cancellationToken);
+            var result = await memory.RememberAsync(session.Raw, cancellationToken);
             if (result.Status != "complete")
             {
-                throw new InvariantException("Benchmark observation did not complete.");
+                throw new InvariantException("Benchmark session did not complete.");
             }
-            progress.NextObservation++;
+            progress.NextSession++;
             Save();
         }
         await AdvanceAsync(questionTime, cancellationToken);

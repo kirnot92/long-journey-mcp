@@ -91,7 +91,9 @@ public sealed partial class SqliteMemoryStore : IMemoryStore
     {
         if (raw.Length > _options.MaxRawCharacters)
         {
-            throw new InputException($"raw exceeds {_options.MaxRawCharacters} characters; submit one observation at a time.");
+            throw new InputException(
+                $"raw has {raw.Length} UTF-16 characters, exceeding MaxRawCharacters={_options.MaxRawCharacters}. " +
+                "Increase MaxRawCharacters to preserve the complete input.");
         }
 
         var contentHash = SourceArchive.ComputeContentHash(raw);

@@ -1,5 +1,4 @@
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json.Nodes;
 using LongJourney.Benchmarks;
 using LongJourney.Core;
@@ -9,7 +8,7 @@ namespace LongJourney.Tests;
 public sealed class BenchmarkDatasetTests
 {
     [Fact]
-    public void KeepsLabelsOutsideObservationsAndPreservesBothRoles()
+    public void KeepsLabelsOutsideSessionInputsAndPreservesBothRoles()
     {
         var item = CreateCase();
         item["question_id"] = "SENSITIVE_ID_abs";
@@ -25,14 +24,14 @@ public sealed class BenchmarkDatasetTests
         Assert.Equal("SENSITIVE_SESSION", Assert.Single(result.Reference.SessionIds));
         Assert.Equal("user", result.History.Turns[0].Role);
         Assert.Equal("assistant", result.History.Turns[1].Role);
-        Assert.Contains(result.History.Observations, observation => observation.Raw.Contains("] user\n", StringComparison.Ordinal));
-        Assert.Contains(result.History.Observations, observation => observation.Raw.Contains("] assistant\n", StringComparison.Ordinal));
-        foreach (var observation in result.History.Observations)
+        Assert.Contains(result.History.Sessions, session => session.Raw.Contains("] user\n", StringComparison.Ordinal));
+        Assert.Contains(result.History.Sessions, session => session.Raw.Contains("] assistant\n", StringComparison.Ordinal));
+        foreach (var session in result.History.Sessions)
         {
-            Assert.DoesNotContain("SENSITIVE", observation.Raw, StringComparison.Ordinal);
-            Assert.DoesNotContain("has_answer", observation.Raw, StringComparison.Ordinal);
-            Assert.DoesNotContain("single-session-user", observation.Raw, StringComparison.Ordinal);
-            Assert.Equal("SENSITIVE_SESSION", observation.SessionId);
+            Assert.DoesNotContain("SENSITIVE", session.Raw, StringComparison.Ordinal);
+            Assert.DoesNotContain("has_answer", session.Raw, StringComparison.Ordinal);
+            Assert.DoesNotContain("single-session-user", session.Raw, StringComparison.Ordinal);
+            Assert.Equal("SENSITIVE_SESSION", session.SessionId);
         }
 
         // Alter every gold field while retaining the same history. Ingestion must be unchanged.
@@ -45,10 +44,10 @@ public sealed class BenchmarkDatasetTests
         item["haystack_sessions"]![0]![0]!["has_answer"] = false;
         var relabeled = Assert.Single(Read(item).Cases);
         Assert.False(relabeled.Reference.IsAbstention);
-        Assert.Equal(result.History.Observations.Count, relabeled.History.Observations.Count);
-        for (var index = 0; index < result.History.Observations.Count; index++)
+        Assert.Equal(result.History.Sessions.Count, relabeled.History.Sessions.Count);
+        for (var index = 0; index < result.History.Sessions.Count; index++)
         {
-            Assert.Equal(result.History.Observations[index].Raw, relabeled.History.Observations[index].Raw);
+            Assert.Equal(result.History.Sessions[index].Raw, relabeled.History.Sessions[index].Raw);
         }
     }
 
@@ -80,6 +79,14 @@ public sealed class BenchmarkDatasetTests
         Assert.Equal(turns[0].At, turns[1].At);
         Assert.Equal(turns[0].At, turns[2].At);
         Assert.Equal(new DateTimeOffset(2023, 4, 10, 8, 0, 0, TimeSpan.Zero), turns[0].At);
+        var sessions = result.History.Sessions;
+        Assert.Equal(3, sessions.Count);
+        Assert.Equal("early-first", sessions[0].SessionId);
+        Assert.Equal("early-second", sessions[1].SessionId);
+        Assert.Equal("late", sessions[2].SessionId);
+        Assert.Equal(turns[0].At, sessions[0].At);
+        Assert.Contains("[turn 1] user\nEarly user.\n\n[turn 2] assistant\nEarly assistant.",
+            sessions[0].Raw, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -126,74 +133,107 @@ public sealed class BenchmarkDatasetTests
     }
 
     [Fact]
-    public void TimelineValidationChecksObservationTimesAndAllowsQuestionTimeEquality()
+    public void TimelineValidationChecksSessionTimesAndAllowsQuestionTimeEquality()
     {
         var result = Assert.Single(Read(CreateCase()).Cases);
         LongMemEvalDataset.ValidateTimeline(result);
         var equalQuestion = result with { Question = result.Question with { At = result.History.Turns[0].At } };
         LongMemEvalDataset.ValidateTimeline(equalQuestion);
-        var futureObservation = result.History.Observations[0] with { At = result.Question.At.AddTicks(1) };
-        var future = result with { History = new BenchmarkHistory(result.History.Turns, [futureObservation]) };
+        var futureSession = result.History.Sessions[0] with { At = result.Question.At.AddTicks(1) };
+        var future = result with { History = new BenchmarkHistory(result.History.Turns, [futureSession]) };
         Assert.Throws<InputException>(() => LongMemEvalDataset.ValidateTimeline(future));
     }
 
     [Fact]
-    public void SplitsSentenceAndNewlineUnitsWithoutRepeatingTurnContext()
+    public void PreservesCompleteSessionContentIncludingListsWhitespaceAndUnicode()
     {
-        const string content = "First sentence. Second question?\r\nThird line!\nFourth line\nFinal";
-        var item = WithSingleTurn(content);
-        var history = Assert.Single(Read(item).Cases).History;
+        const string content = "  Here are other alternatives. Which is better?\r\n\r\n" +
+                               "1. First option. Its explanation!\r\n" +
+                               "2. 다른 표현。설명도 함께！🚀\n\nFinal note.  ";
+        var history = Assert.Single(Read(WithSingleTurn(content)).Cases).History;
         Assert.Equal(content, Assert.Single(history.Turns).Content);
-        Assert.Equal(5, history.Observations.Count);
-        Assert.Equal("First sentence. ", Body(history.Observations[0]));
-        Assert.Equal("Second question?\r\n", Body(history.Observations[1]));
-        Assert.Equal("Third line!\n", Body(history.Observations[2]));
-        Assert.Equal("Fourth line\n", Body(history.Observations[3]));
-        Assert.Equal("Final", Body(history.Observations[4]));
-        Assert.Equal(content, Reconstruct(history.Observations));
+        var session = Assert.Single(history.Sessions);
+        Assert.Equal("[2023-04-10T10:00:00.0000000Z] conversation\n\n[turn 1] assistant\n" + content, session.Raw);
+        Assert.Equal(history.Turns[0].At, session.At);
     }
 
     [Fact]
-    public void SplitsUnspacedCjkSentences()
+    public void CombinesDialogueTurnsInOrderIntoOneContextualInput()
     {
-        const string content = "첫 문장。다음 문장！마지막？";
-        var history = Assert.Single(Read(WithSingleTurn(content)).Cases).History;
-        Assert.Equal(3, history.Observations.Count);
-        Assert.Equal(content, Reconstruct(history.Observations));
+        var item = CreateCase();
+        const string first = "I bought a piano. It is blue.\n ";
+        const string second = "  Then use the bench I suggested for it.\r\n";
+        item["haystack_sessions"]![0]![0]!["content"] = first;
+        item["haystack_sessions"]![0]![1]!["content"] = second;
+        var history = Assert.Single(Read(item).Cases).History;
+        var session = Assert.Single(history.Sessions);
+        Assert.Equal(2, history.Turns.Count);
+        Assert.Equal("[2023-04-10T10:00:00.0000000Z] conversation\n\n[turn 1] user\n" + first +
+                     "\n\n[turn 2] assistant\n" + second, session.Raw);
+        Assert.Equal(first, history.Turns[0].Content);
+        Assert.Equal(second, history.Turns[1].Content);
+    }
+
+    [Fact]
+    public void SkipsEmptySessionsWithoutLosingNonemptySessionOrder()
+    {
+        var item = CreateCase();
+        var content = item["haystack_sessions"]![0]!.DeepClone();
+        item["haystack_session_ids"] = new JsonArray("empty-first", "session-one", "empty-last");
+        item["haystack_dates"] = new JsonArray(
+            "2023/04/10 (Mon) 08:00", "2023/04/10 (Mon) 10:00", "2023/04/10 (Mon) 11:00");
+        item["haystack_sessions"] = new JsonArray(new JsonArray(), content, new JsonArray());
+        var history = Assert.Single(Read(item).Cases).History;
+        Assert.Equal(2, history.Turns.Count);
+        Assert.Equal("session-one", Assert.Single(history.Sessions).SessionId);
+
+        item = CreateCase();
+        item["haystack_sessions"] = new JsonArray(new JsonArray());
+        history = Assert.Single(Read(item).Cases).History;
+        Assert.Empty(history.Turns);
+        Assert.Empty(history.Sessions);
     }
 
     [Theory]
-    [InlineData(43)]
-    [InlineData(80)]
+    [InlineData(100)]
     [InlineData(1000)]
-    public void HardSplitsOversizedUnitsWithinTotalRawLimitWithoutBreakingUnicode(int limit)
+    [InlineData(4000)]
+    [InlineData(64000)]
+    public void AppliesRawLimitToCompleteSessionHeadersAndContentWithoutSplitting(int limit)
     {
-        var content = new string('x', limit - 42) + "🚀" + new string('한', 2200) + "👨‍👩‍👧";
-        var item = WithSingleTurn(content);
-        var dataset = Read(item, limit);
-        var history = Assert.Single(dataset.Cases).History;
-        Assert.Equal(content, Assert.Single(history.Turns).Content);
-        Assert.Equal(content, Reconstruct(history.Observations));
-        for (var index = 0; index < history.Observations.Count; index++)
-        {
-            var observation = history.Observations[index];
-            Assert.InRange(observation.Raw.Length, 1, limit);
-            Assert.Equal(index, observation.PartIndex);
-            Assert.Equal(0, observation.TurnIndex);
-            Assert.Equal(history.Turns[0].At, observation.At);
-            var body = Body(observation);
-            Assert.False(char.IsLowSurrogate(body[0]));
-            Assert.False(char.IsHighSurrogate(body[^1]));
-        }
+        const string header = "[2023-04-10T10:00:00.0000000Z] conversation\n\n[turn 1] assistant\n";
+        var content = new string('한', limit - header.Length - 2) + "🚀";
+        var history = Assert.Single(Read(WithSingleTurn(content), limit).Cases).History;
+        var session = Assert.Single(history.Sessions);
+        Assert.Equal(limit, session.Raw.Length);
+        Assert.Equal(header + content, session.Raw);
 
-        var repeated = Assert.Single(Read(item, limit).Cases).History;
-        Assert.Equal(history.Observations, repeated.Observations);
+        var error = Assert.Throws<InputException>(() => Read(WithSingleTurn(content + "x"), limit));
+        Assert.Contains("max_raw_characters", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains((limit + 1).ToString(), error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(content, error.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void RejectsACompleteSessionWhenItsIndividualTurnsWouldEachFit()
+    {
+        var item = CreateCase();
+        var content = new string('x', 80);
+        item["haystack_sessions"]![0]![0]!["content"] = content;
+        item["haystack_sessions"]![0]![1]!["content"] = content;
+        var expected = "[2023-04-10T10:00:00.0000000Z] conversation\n\n[turn 1] user\n" + content +
+                       "\n\n[turn 2] assistant\n" + content;
+        var error = Assert.Throws<InputException>(() => Read(item, 200));
+        Assert.Contains(expected.Length.ToString(), error.Message, StringComparison.Ordinal);
+        Assert.Contains("case[0].haystack_sessions[0]", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain("session-one", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(content, error.Message, StringComparison.Ordinal);
     }
 
     [Theory]
+    [InlineData(0)]
     [InlineData(42)]
-    [InlineData(1001)]
-    public void RejectsInvalidObservationLimits(int limit)
+    public void RejectsInvalidSessionRawLimits(int limit)
     {
         Assert.Throws<ArgumentOutOfRangeException>(() => Read(CreateCase(), limit));
     }
@@ -332,7 +372,7 @@ public sealed class BenchmarkDatasetTests
         {
             Assert.Equal(complete.Cases[index + 1].Question, selected.Cases[index].Question);
             Assert.Equal(complete.Cases[index + 1].History.Turns, selected.Cases[index].History.Turns);
-            Assert.Equal(complete.Cases[index + 1].History.Observations, selected.Cases[index].History.Observations);
+            Assert.Equal(complete.Cases[index + 1].History.Sessions, selected.Cases[index].History.Sessions);
             Assert.Equal(complete.Cases[index + 1].Reference.Answer, selected.Cases[index].Reference.Answer);
             Assert.Equal(complete.Cases[index + 1].Reference.SessionIds, selected.Cases[index].Reference.SessionIds);
         }
@@ -367,6 +407,29 @@ public sealed class BenchmarkDatasetTests
         Assert.Throws<InvalidDataException>(() => LongMemEvalDataset.Read(file.Path));
         await Assert.ThrowsAsync<InvalidDataException>(() =>
             LongMemEvalDataset.ReadSelectedAsync(file.Path, 1000, ["z-unselected"], 1));
+    }
+
+    [Fact]
+    public async Task StreamingSelectionPreservesWholeSessionsAndRejectsOnlySelectedOversizedSessions()
+    {
+        var oversized = NamedCase("z-oversized");
+        oversized["haystack_sessions"]![0]![0]!["content"] = new string('x', 4000);
+        var selectedCase = NamedCase("a-selected");
+        const string content = "Choose another term.\r\n1. A complete first option.\n2. A complete second option.";
+        selectedCase["haystack_sessions"]![0]![0]!["content"] = content;
+        using var file = new DatasetFile(new JsonArray(oversized, selectedCase).ToJsonString());
+
+        var selected = await LongMemEvalDataset.ReadSelectedAsync(file.Path, 4000, ["a-selected"], 1);
+        var history = Assert.Single(selected.Cases).History;
+        var session = Assert.Single(history.Sessions);
+        Assert.Equal("[2023-04-10T10:00:00.0000000Z] conversation\n\n[turn 1] user\n" + content +
+                     "\n\n[turn 2] assistant\nI suggested a bench.", session.Raw);
+
+        var error = await Assert.ThrowsAsync<InputException>(() =>
+            LongMemEvalDataset.ReadSelectedAsync(file.Path, 4000, ["a-selected", "z-oversized"], 1));
+        Assert.Contains("case[0].haystack_sessions[0]", error.Message, StringComparison.Ordinal);
+        Assert.Contains("max_raw_characters", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("z-oversized", error.Message, StringComparison.Ordinal);
     }
 
     [Theory]
@@ -425,7 +488,7 @@ public sealed class BenchmarkDatasetTests
         await Assert.ThrowsAsync<InputException>(() =>
             LongMemEvalDataset.ReadSelectedAsync(file.Path, 1000, [], 0));
         await Assert.ThrowsAsync<ArgumentOutOfRangeException>(() =>
-            LongMemEvalDataset.ReadSelectedAsync(file.Path, 1001, [], 1));
+            LongMemEvalDataset.ReadSelectedAsync(file.Path, 42, [], 1));
     }
 
     [Theory]
@@ -479,24 +542,10 @@ public sealed class BenchmarkDatasetTests
         return item;
     }
 
-    private static BenchmarkDataset Read(JsonObject item, int maxRawCharacters = 1000)
+    private static BenchmarkDataset Read(JsonObject item, int maxRawCharacters = 64_000)
     {
         using var file = new DatasetFile(new JsonArray(item.DeepClone()).ToJsonString());
         return LongMemEvalDataset.Read(file.Path, maxRawCharacters);
-    }
-
-    private static string Body(BenchmarkObservation observation) =>
-        observation.Raw[(observation.Raw.IndexOf('\n') + 1)..];
-
-    private static string Reconstruct(IReadOnlyList<BenchmarkObservation> observations)
-    {
-        var text = new StringBuilder();
-        foreach (var observation in observations)
-        {
-            text.Append(Body(observation));
-        }
-
-        return text.ToString();
     }
 
     private static JsonObject CreateCase() => JsonNode.Parse("""

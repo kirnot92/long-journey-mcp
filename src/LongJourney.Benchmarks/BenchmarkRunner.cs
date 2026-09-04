@@ -20,6 +20,23 @@ public sealed class BenchmarkRunner(
     {
         options.Validate();
         var cases = options.SelectCases(dataset);
+        // Public callers can supply histories read with a different raw limit. Validate every selected
+        // input before creating artifacts or letting an earlier case spend from the experiment budget.
+        for (var caseIndex = 0; caseIndex < cases.Count; caseIndex++)
+        {
+            var sessions = cases[caseIndex].History.Sessions;
+            for (var sessionIndex = 0; sessionIndex < sessions.Count; sessionIndex++)
+            {
+                var rawLength = sessions[sessionIndex].Raw.Length;
+                if (rawLength > options.MaxRawCharacters)
+                {
+                    throw new InputException(
+                        $"Benchmark case[{caseIndex}].sessions[{sessionIndex}] raw has {rawLength} UTF-16 characters, " +
+                        $"exceeding max_raw_characters={options.MaxRawCharacters}. Increase max_raw_characters to at least " +
+                        $"{rawLength} to preserve the complete session.");
+                }
+            }
+        }
         var units = BenchmarkArtifacts.Units(options, cases);
         using var experimentLease = BenchmarkArtifacts.AcquireExperiment(options.OutputDirectory);
         PrepareManifest(dataset, units);
@@ -71,7 +88,7 @@ public sealed class BenchmarkRunner(
         var existing = BenchmarkArtifacts.Read<ExperimentManifest>(path);
         if (existing is not null)
         {
-            if (existing.Fingerprint != fingerprint)
+            if (existing.ProtocolVersion != BenchmarkOptions.ProtocolVersion || existing.Fingerprint != fingerprint)
             {
                 throw new InputException("Dataset, configuration or implementation differs from this experiment. Use a new output directory.");
             }
@@ -98,7 +115,7 @@ public sealed class BenchmarkRunner(
         var saved = store.GetState(BenchmarkReplay.ProgressKey);
         var progress = saved is null ? new BenchmarkProgress
         {
-            Clock = item.History.Observations.Count == 0 ? item.Question.At : item.History.Observations[0].At
+            Clock = item.History.Sessions.Count == 0 ? item.Question.At : item.History.Sessions[0].At
         } : JsonSerializer.Deserialize<BenchmarkProgress>(saved, JsonDefaults.Options)
             ?? throw new InvariantException("Invalid replay checkpoint.");
         var clock = new ReplayClock(progress.Clock);

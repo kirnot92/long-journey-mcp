@@ -1,3 +1,4 @@
+using System.Text.Json;
 using LongJourney.Benchmarks;
 using LongJourney.Core;
 
@@ -162,9 +163,195 @@ public sealed class BenchmarkRunnerTests
         fixture.Options.AnswerModel.OutputUsdPerMillion = 0;
         Assert.Throws<InputException>(fixture.Options.Validate);
         fixture.Options.AnswerModel.OutputUsdPerMillion = 12;
-        fixture.Options.MaxRawCharacters = 1001;
+        fixture.Options.MaxRawCharacters = 99;
+        Assert.Throws<InputException>(fixture.Options.Validate);
+        fixture.Options.MaxRawCharacters = 64_000;
+        fixture.Options.MaxObservations = 0;
         Assert.Throws<InputException>(fixture.Options.Validate);
         Assert.False(Directory.Exists(fixture.Options.OutputDirectory));
+    }
+
+    [Theory]
+    [InlineData(1000, 1)]
+    [InlineData(4000, 8)]
+    [InlineData(64000, 32)]
+    public void ConfiguredSessionLimitsAreUsedByMemoryEngine(int rawLimit, int observationLimit)
+    {
+        using var fixture = new Fixture();
+        fixture.Options.MaxRawCharacters = rawLimit;
+        fixture.Options.MaxObservations = observationLimit;
+        fixture.Options.Validate();
+        var engine = fixture.Options.CreateEngineOptions("test-corpus", BenchmarkVariant.Remember);
+        Assert.Equal(rawLimit, engine.MaxRawCharacters);
+        Assert.Equal(observationLimit, engine.MaxObservations);
+        Assert.Equal(3, engine.RootBase);
+    }
+
+    [Fact]
+    public void BenchmarkSessionDefaultsLeaveProductionLimitsUnchanged()
+    {
+        var benchmark = new BenchmarkOptions();
+        Assert.Equal(64_000, benchmark.MaxRawCharacters);
+        Assert.Equal(32, benchmark.MaxObservations);
+        var production = new EngineOptions();
+        Assert.Equal(4000, production.MaxRawCharacters);
+        Assert.Equal(1, production.MaxObservations);
+    }
+
+    [Fact]
+    public async Task OneSessionExtractsContextualMemoriesSharingOneRootAndResumesWithoutReextracting()
+    {
+        using var fixture = new Fixture();
+        fixture.Options.Variants = [BenchmarkVariant.Remember];
+        fixture.ExtractionProposals =
+        [
+            new ObservationProposal("The user rejected the previous suggestion as too long."),
+            new ObservationProposal("The assistant acknowledged the misunderstanding and proposed an alternative."),
+            new ObservationProposal("The assistant offered First option and Second option, each with an explanation.")
+        ];
+        fixture.FailStage = "judge";
+        Directory.CreateDirectory(Path.GetDirectoryName(fixture.Options.DatasetPath)!);
+        File.WriteAllText(fixture.Options.DatasetPath, """
+            [{
+              "question_id": "case-1",
+              "question_type": "single-session-assistant",
+              "question": "Which alternatives were offered?",
+              "answer": "SECRET_REFERENCE_ONLY_FOR_JUDGE",
+              "question_date": "2023/05/30 (Tue) 00:36",
+              "haystack_session_ids": ["session-one"],
+              "haystack_dates": ["2023/05/23 (Tue) 19:23"],
+              "answer_session_ids": ["session-one"],
+              "haystack_sessions": [[
+                {"role": "user", "content": "That is longer."},
+                {"role": "assistant", "content": "I misunderstood. Here is another suggestion. It has this meaning."},
+                {"role": "user", "content": "Think of something better."},
+                {"role": "assistant", "content": "  Here are alternatives:\r\n1. First option. Its explanation.\r\n2. Second option. Its explanation.\nI hope this helps.  "}
+              ]]
+            }]
+            """);
+        fixture.Dataset = LongMemEvalDataset.Read(fixture.Options.DatasetPath);
+        var history = Assert.Single(fixture.Dataset.Cases).History;
+        var session = Assert.Single(history.Sessions);
+        Assert.Equal(4, history.Turns.Count);
+
+        var interrupted = await fixture.RunAsync();
+        Assert.Equal("failed", Assert.Single(interrupted.Results).Status);
+        Assert.Equal(session.Raw, Assert.Single(fixture.ExtractionInputs));
+        Assert.Equal(1, fixture.ExtractCalls);
+        var unit = Assert.Single(BenchmarkArtifacts.Units(fixture.Options, fixture.Dataset.Cases));
+        var mappings = BenchmarkArtifacts.Read<List<SourceSession>>(Path.Combine(unit.Directory, "source-sessions.json"))!;
+        var mapping = Assert.Single(mappings);
+        Assert.Equal("session-one", mapping.SessionId);
+        var store = new SqliteMemoryStore(fixture.Options.CreateEngineOptions(unit.CorpusDirectory, unit.Variant));
+        Assert.Equal(session.Raw, store.ReadSource(mapping.SourceId).Raw);
+        var memories = store.GetSourceMemories(mapping.SourceId);
+        Assert.Equal(3, memories.Count);
+        foreach (var memory in memories)
+        {
+            Assert.Equal(mapping.SourceId, memory.SourceRef);
+            Assert.Equal(1, memory.UniqueSourceRootCount);
+            Assert.Equal(0, memory.Depth);
+        }
+        var checkpoint = JsonSerializer.Deserialize<BenchmarkProgress>(store.GetState(BenchmarkReplay.ProgressKey)!, JsonDefaults.Options)!;
+        Assert.Equal(1, checkpoint.NextSession);
+        Assert.True(checkpoint.IngestionComplete);
+
+        Assert.Equal(1, (await fixture.RunAsync()).Completed);
+        Assert.Equal(1, fixture.ExtractCalls);
+        Assert.Equal(2, fixture.JudgeCalls);
+        Assert.Equal(3, store.GetSourceMemories(mapping.SourceId).Count);
+    }
+
+    [Fact]
+    public async Task DuplicateSessionContentReusesItsSourceAcrossSessionIds()
+    {
+        using var fixture = new Fixture();
+        fixture.Options.Variants = [BenchmarkVariant.Remember];
+        var original = fixture.Dataset.Cases[0];
+        var session = original.History.Sessions[0];
+        fixture.Dataset = new BenchmarkDataset("duplicate-sessions", [original with
+        {
+            History = new BenchmarkHistory([original.History.Turns[0]],
+                [session, session with { SessionId = "another-session" }])
+        }]);
+        Assert.Equal(1, (await fixture.RunAsync()).Completed);
+        Assert.Equal(1, fixture.ExtractCalls);
+        var unit = Assert.Single(BenchmarkArtifacts.Units(fixture.Options, fixture.Dataset.Cases));
+        var mappings = BenchmarkArtifacts.Read<List<SourceSession>>(Path.Combine(unit.Directory, "source-sessions.json"))!;
+        Assert.Equal(2, mappings.Count);
+        Assert.Equal(mappings[0].SourceId, mappings[1].SourceId);
+        Assert.NotEqual(mappings[0].SessionId, mappings[1].SessionId);
+        var store = new SqliteMemoryStore(fixture.Options.CreateEngineOptions(unit.CorpusDirectory, unit.Variant));
+        Assert.Equal(1, Assert.Single(store.GetSourceMemories(mappings[0].SourceId)).UniqueSourceRootCount);
+        var checkpoint = JsonSerializer.Deserialize<BenchmarkProgress>(store.GetState(BenchmarkReplay.ProgressKey)!, JsonDefaults.Options)!;
+        Assert.Equal(2, checkpoint.NextSession);
+    }
+
+    [Fact]
+    public async Task EmptySessionsDoNotCallExtraction()
+    {
+        using var fixture = new Fixture();
+        fixture.Options.Variants = [BenchmarkVariant.Remember];
+        var original = fixture.Dataset.Cases[0];
+        fixture.Dataset = new BenchmarkDataset("empty-sessions", [original with { History = new BenchmarkHistory([], []) }]);
+        var report = await fixture.RunAsync();
+        Assert.Equal(1, report.Completed);
+        Assert.Equal(0, fixture.ExtractCalls);
+        Assert.Empty(Assert.Single(report.Results).Metrics!.Graph.DepthCounts);
+    }
+
+    [Fact]
+    public void LegacyTurnCheckpointCannotBecomeAZeroSessionCursor()
+    {
+        Assert.Throws<JsonException>(() => JsonSerializer.Deserialize<BenchmarkProgress>(
+            "{\"next_observation\":4}", JsonDefaults.Options));
+    }
+
+    [Theory]
+    [InlineData("longmemeval-v1")]
+    [InlineData("longmemeval-v2-whole-turn")]
+    public async Task EarlierProtocolsCannotResumeOrReuseResults(string protocol)
+    {
+        using var fixture = new Fixture();
+        fixture.Options.Variants = [BenchmarkVariant.Remember];
+        await fixture.RunAsync();
+        var path = Path.Combine(fixture.Options.OutputDirectory, "manifest.json");
+        var manifest = BenchmarkArtifacts.Read<ExperimentManifest>(path)!;
+        BenchmarkArtifacts.Write(path, manifest with { ProtocolVersion = protocol });
+        var calls = fixture.ExtractCalls;
+        await Assert.ThrowsAsync<InputException>(() => fixture.RunAsync());
+        Assert.Equal(calls, fixture.ExtractCalls);
+        Assert.Equal(1, fixture.AnswerCalls);
+    }
+
+    [Fact]
+    public async Task OversizedSelectedSessionStopsBeforeEarlierCasesOrFactoriesCanRun()
+    {
+        using var fixture = new Fixture();
+        var original = fixture.Dataset.Cases[0];
+        var raw = new string('x', fixture.Options.MaxRawCharacters + 1);
+        var oversized = original with
+        {
+            Id = "case-2",
+            History = new BenchmarkHistory(
+                [new BenchmarkTurn("private-session", 0, Fixture.Start, "user", raw)],
+                [new BenchmarkSession("private-session", Fixture.Start, raw)])
+        };
+        fixture.Dataset = new BenchmarkDataset("oversized", [original, oversized]);
+        fixture.Options.Limit = 2;
+        var runner = new BenchmarkRunner(fixture.Options,
+            (_, _, _) => throw new InvalidOperationException("Cognition factory must not run."),
+            (_, _) => throw new InvalidOperationException("Language model factory must not run."));
+
+        var error = await Assert.ThrowsAsync<InputException>(() => runner.RunAsync(fixture.Dataset));
+        Assert.Contains("max_raw_characters", error.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.DoesNotContain("private-session", error.Message, StringComparison.Ordinal);
+        Assert.DoesNotContain(raw, error.Message, StringComparison.Ordinal);
+        Assert.False(Directory.Exists(fixture.Options.OutputDirectory));
+
+        fixture.Options.QuestionIds = [original.Id];
+        fixture.Options.Variants = [BenchmarkVariant.Remember];
+        Assert.Equal(1, (await fixture.RunAsync()).Completed);
     }
 
     private sealed class Fixture : IDisposable
@@ -174,6 +361,8 @@ public sealed class BenchmarkRunnerTests
         public BenchmarkOptions Options { get; }
         public BenchmarkDataset Dataset { get; set; }
         public string? FailStage { get; set; }
+        public IReadOnlyList<ObservationProposal>? ExtractionProposals { get; set; }
+        public List<string> ExtractionInputs { get; } = [];
         public int ExtractCalls { get; private set; }
         public int AnswerCalls { get; private set; }
         public int JudgeCalls { get; private set; }
@@ -187,16 +376,16 @@ public sealed class BenchmarkRunnerTests
                 ExperimentBudgetUsd = 100
             };
             var turns = new List<BenchmarkTurn>();
-            var observations = new List<BenchmarkObservation>();
+            var sessions = new List<BenchmarkSession>();
             for (var index = 0; index < 10; index++)
             {
                 var at = index == 9 ? Start.AddDays(2) : Start;
                 var raw = $"A recorded experience number {index}.";
                 turns.Add(new BenchmarkTurn($"session-{index}", 0, at, "user", raw));
-                observations.Add(new BenchmarkObservation($"session-{index}", 0, 0, at, raw));
+                sessions.Add(new BenchmarkSession($"session-{index}", at, raw));
             }
             Dataset = new BenchmarkDataset("synthetic-v1", [
-                new BenchmarkCase("case-1", new BenchmarkHistory(turns, observations),
+                new BenchmarkCase("case-1", new BenchmarkHistory(turns, sessions),
                     new BenchmarkQuestion("What was recorded?", Start.AddDays(8)),
                     new BenchmarkReference("SECRET_REFERENCE_ONLY_FOR_JUDGE", "multi-session", false, ["session-0"]))
             ]);
@@ -234,9 +423,10 @@ public sealed class BenchmarkRunnerTests
                 Assert.DoesNotContain("SECRET_REFERENCE", raw);
                 Charge(ledger, clock, context, "remember");
                 fixture.ExtractCalls++;
+                fixture.ExtractionInputs.Add(raw);
                 fixture.FailOnce("remember");
                 return Task.FromResult(new CognitiveResult<IReadOnlyList<ObservationProposal>>(
-                    [new ObservationProposal(raw)], "fake"));
+                    fixture.ExtractionProposals ?? [new ObservationProposal(raw)], "fake"));
             }
             public Task<EmbeddingVector> EmbedAsync(string text, CallContext context, CancellationToken cancellationToken)
             {

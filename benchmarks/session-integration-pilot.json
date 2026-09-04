@@ -1,0 +1,16 @@
+{
+  "dataset_path": "../TestResults/benchmark-input/longmemeval_oracle.json",
+  "split": "oracle",
+  "output_directory": "../TestResults/benchmark-session-integration",
+  "question_ids": ["gpt4_f49edff3"],
+  "variants": ["meditation"],
+  "experiment_budget_usd": 9,
+  "meditation_budget_usd": 5,
+  "max_raw_characters": 64000,
+  "max_observations": 32,
+  "open_ai": {
+    "remember": {
+      "max_output_tokens": 8192
+    }
+  }
+}

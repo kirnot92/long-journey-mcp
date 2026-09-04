@@ -13,7 +13,8 @@ public sealed class MemoryEngine(
         if (raw.Length > options.MaxRawCharacters)
         {
             throw new InputException(
-                $"raw exceeds {options.MaxRawCharacters} characters; split it into individual observations.");
+                $"raw has {raw.Length} UTF-16 characters, exceeding MaxRawCharacters={options.MaxRawCharacters}. " +
+                "Increase MaxRawCharacters to preserve the complete input.");
         }
 
         var artifact = store.SaveSource(raw, timeProvider.GetUtcNow());

@@ -41,11 +41,25 @@ public sealed class OpenAiCognition : ICognition
         var observationsSchema = StructuredOutputSchema.Array(observationSchema, _engine.MaxObservations);
         var schema = StructuredOutputSchema.Object(("observations", observationsSchema));
         var prompt = $"""
-            Select independent direct observations worth remembering from the raw source, with minimal normalization.
-            Do not generalize from this single experience or infer a person's enduring preferences.
-            Keep the source's language and meaningful context. Greetings and content-free inputs may yield no observations.
+            Read the complete raw source, reconstruct its events and topic exchanges, then extract observations with minimal normalization.
+            An observation is one independently understandable event or exchange, not one utterance. Do not paraphrase each turn separately.
+            For a topic, combine the request, relevant answer or alternatives, subsequent clarification, and latest decision state when they belong together.
+            Separate distinct events or topics; keep inseparable context together. A long exchange may need multiple observations,
+            but each must repeat the subject and constraints it needs rather than relying on another observation to explain it.
+            Retain substantive information from both speakers, including actual answers, recommendations, alternatives, and explanations.
+            Preserve useful names, dates, quantities, and members of requested lists with their purpose. Do not replace substantive details with 'advice was given'.
+            Name the relevant person or recipient, purpose, and local constraints in every observation where they matter.
+            Resolve references such as 'it', 'the chosen message', or 'stores mentioned' into their actual subject or content when the source identifies it.
+            Mere acknowledgments, praise of an answer, and repeated requests add no separate observation when the substantive exchange is already represented.
+            Preserve the source's language, uncertainty, event order, and corrections. Keep 'considering', 'I think I will', and 'something like' tentative;
+            do not promote a suggestion to a decision, a plan to a purchase, an example wording to an exact commitment, or an order to delivery.
+            A source timestamp dates the report, not every event it describes. Preserve unresolved relative timing; do not invent an event date.
+            Resolve a reply's reference only from preceding context that actually identifies its subject. The first visible reply may concern omitted context;
+            never bind it to a proposal introduced later. Leave an unknown subject unknown or omit that fragment.
+            Do not merge different people or events without evidence, or infer causes, personal traits, or enduring preferences.
+            Before returning, read each observation alone for missing context, then recheck the whole source for omitted substantive information and duplicated claims.
             Produce at most {_engine.MaxObservations} observations, each at most {_engine.MaxMemoryCharacters} characters.
-            This is an observation-sized input. Do not force an observation when nothing warrants remembering.
+            This limit is not a target. Greetings or content-free inputs may yield no observations.
             """;
         using var result = await RespondAsync(CognitionRole.Remember, "remember", prompt, new
         {

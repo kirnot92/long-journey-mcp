@@ -1,5 +1,6 @@
 using System.Globalization;
 using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using LongJourney.Core;
 
@@ -15,13 +16,12 @@ public sealed record BenchmarkCase(
 
 public sealed record BenchmarkHistory(
     IReadOnlyList<BenchmarkTurn> Turns,
-    IReadOnlyList<BenchmarkObservation> Observations);
+    IReadOnlyList<BenchmarkSession> Sessions);
 
 public sealed record BenchmarkTurn(
     string SessionId, int TurnIndex, DateTimeOffset At, string Role, string Content);
 
-public sealed record BenchmarkObservation(
-    string SessionId, int TurnIndex, int PartIndex, DateTimeOffset At, string Raw);
+public sealed record BenchmarkSession(string SessionId, DateTimeOffset At, string Raw);
 
 public sealed record BenchmarkQuestion(string Text, DateTimeOffset At);
 
@@ -41,7 +41,7 @@ public static class LongMemEvalDataset
         "yyyy-MM-dd'T'HH:mm:ss.FFFFFFF'Z'"
     ];
 
-    public static BenchmarkDataset Read(string path, int maxRawCharacters = 1000)
+    public static BenchmarkDataset Read(string path, int maxRawCharacters = 64_000)
     {
         ValidateRawLimit(maxRawCharacters);
 
@@ -178,11 +178,11 @@ public static class LongMemEvalDataset
 
     private static void ValidateRawLimit(int maxRawCharacters)
     {
-        // The longest header needs 41 UTF-16 characters; leave space for a surrogate pair.
-        if (maxRawCharacters < MinimumRawCharacters || maxRawCharacters > 1000)
+        // Reject unusably small raw limits before opening the dataset.
+        if (maxRawCharacters < MinimumRawCharacters)
         {
             throw new ArgumentOutOfRangeException(
-                nameof(maxRawCharacters), "Observation length must be between 43 and 1000 characters.");
+                nameof(maxRawCharacters), "Session raw length limit must be at least 43 UTF-16 characters.");
         }
     }
 
@@ -197,11 +197,11 @@ public static class LongMemEvalDataset
             }
         }
 
-        foreach (var observation in item.History.Observations)
+        foreach (var session in item.History.Sessions)
         {
-            if (observation.At > item.Question.At)
+            if (session.At > item.Question.At)
             {
-                throw new InputException("Benchmark history contains an observation after question_date.");
+                throw new InputException("Benchmark history contains a session after question_date.");
             }
         }
     }
@@ -283,9 +283,18 @@ public static class LongMemEvalDataset
         }
 
         var turns = new List<BenchmarkTurn>();
-        var observations = new List<BenchmarkObservation>();
+        var historySessions = new List<BenchmarkSession>();
         foreach (var session in sessions)
         {
+            if (session.Contents.GetArrayLength() == 0)
+            {
+                continue;
+            }
+
+            // One source retains the complete dialogue; IDs and gold labels never enter the raw input.
+            var sessionRaw = new StringBuilder();
+            sessionRaw.Append('[').Append(session.At.ToString(TimestampFormat, CultureInfo.InvariantCulture))
+                .Append("] conversation");
             for (var turnIndex = 0; turnIndex < session.Contents.GetArrayLength(); turnIndex++)
             {
                 var turnLocation = $"{location}.haystack_sessions[{session.OriginalIndex}][{turnIndex}]";
@@ -304,71 +313,22 @@ public static class LongMemEvalDataset
                 }
 
                 var content = RequiredString(turnElement, "content", turnLocation);
-                var turn = new BenchmarkTurn(session.Id, turnIndex, session.At, role, content);
-                turns.Add(turn);
-                AddObservations(turn, maxRawCharacters, observations);
+                turns.Add(new BenchmarkTurn(session.Id, turnIndex, session.At, role, content));
+                sessionRaw.Append("\n\n[turn ").Append((turnIndex + 1).ToString(CultureInfo.InvariantCulture))
+                    .Append("] ").Append(role).Append('\n').Append(content);
             }
+            if (sessionRaw.Length > maxRawCharacters)
+            {
+                throw new InputException(
+                    $"Invalid benchmark dataset at {location}.haystack_sessions[{session.OriginalIndex}]: " +
+                    $"complete session raw has {sessionRaw.Length} UTF-16 characters, exceeding max_raw_characters={maxRawCharacters}. " +
+                    $"Increase max_raw_characters to at least {sessionRaw.Length} to preserve the complete session.");
+            }
+            historySessions.Add(new BenchmarkSession(session.Id, session.At, sessionRaw.ToString()));
         }
 
-        return new BenchmarkCase(id, new BenchmarkHistory(turns, observations), question,
+        return new BenchmarkCase(id, new BenchmarkHistory(turns, historySessions), question,
             new BenchmarkReference(answer, questionType, id.EndsWith("_abs", StringComparison.Ordinal), referenceIds));
-    }
-
-    private static void AddObservations(BenchmarkTurn turn, int maxRawCharacters, List<BenchmarkObservation> observations)
-    {
-        // IDs and labels can reveal the gold evidence; only natural history fields belong in raw.
-        var header = $"[{turn.At.ToString(TimestampFormat, CultureInfo.InvariantCulture)}] {turn.Role}\n";
-        var contentLimit = maxRawCharacters - header.Length;
-        var partIndex = 0;
-        var unitStart = 0;
-        for (var index = 0; index < turn.Content.Length; index++)
-        {
-            var character = turn.Content[index];
-            var isNewline = character is '\n' or '\r';
-            var isSentenceEnd = character is '.' or '!' or '?';
-            var isUnspacedSentenceEnd = character is '。' or '！' or '？';
-            var followedByBoundary = index + 1 == turn.Content.Length || char.IsWhiteSpace(turn.Content[index + 1]);
-            if (!isNewline && !isUnspacedSentenceEnd && !(isSentenceEnd && followedByBoundary))
-            {
-                continue;
-            }
-
-            var unitEnd = index + 1;
-            // Keep boundary whitespace in its original unit so chunk bodies reconstruct the exact message.
-            while (unitEnd < turn.Content.Length && char.IsWhiteSpace(turn.Content[unitEnd]))
-            {
-                unitEnd++;
-            }
-
-            AddUnit(turn, header, unitStart, unitEnd, contentLimit, observations, ref partIndex);
-            unitStart = unitEnd;
-            index = unitEnd - 1;
-        }
-
-        if (unitStart < turn.Content.Length)
-        {
-            AddUnit(turn, header, unitStart, turn.Content.Length, contentLimit, observations, ref partIndex);
-        }
-    }
-
-    private static void AddUnit(
-        BenchmarkTurn turn, string header, int start, int end, int contentLimit,
-        List<BenchmarkObservation> observations, ref int partIndex)
-    {
-        while (start < end)
-        {
-            var length = Math.Min(contentLimit, end - start);
-            if (start + length < end && char.IsHighSurrogate(turn.Content[start + length - 1])
-                && char.IsLowSurrogate(turn.Content[start + length]))
-            {
-                length--;
-            }
-
-            var raw = header + turn.Content.Substring(start, length);
-            observations.Add(new BenchmarkObservation(turn.SessionId, turn.TurnIndex, partIndex, turn.At, raw));
-            partIndex++;
-            start += length;
-        }
     }
 
     private static DateTimeOffset ReadDate(string value, string location)

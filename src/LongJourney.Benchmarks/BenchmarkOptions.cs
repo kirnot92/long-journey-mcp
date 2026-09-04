@@ -19,7 +19,7 @@ public enum BenchmarkVariant
 [JsonUnmappedMemberHandling(JsonUnmappedMemberHandling.Disallow)]
 public sealed class BenchmarkOptions
 {
-    public const string ProtocolVersion = "longmemeval-v1";
+    public const string ProtocolVersion = "longmemeval-v3-session";
     public string DatasetPath { get; set; } = "";
     public string Split { get; set; } = "oracle";
     public string OutputDirectory { get; set; } = "";
@@ -30,7 +30,8 @@ public sealed class BenchmarkOptions
          BenchmarkVariant.Relations, BenchmarkVariant.Meditation];
     public decimal ExperimentBudgetUsd { get; set; } = 10m;
     public decimal MeditationBudgetUsd { get; set; } = 5m;
-    public int MaxRawCharacters { get; set; } = 1000;
+    public int MaxRawCharacters { get; set; } = 64_000;
+    public int MaxObservations { get; set; } = 32;
     public int RetrievalContextCharacters { get; set; } = 32_000;
     public int FullHistoryContextCharacters { get; set; } = 1_000_000;
     public ModelOptions AnswerModel { get; set; } = new() { ReasoningEffort = "medium" };
@@ -61,7 +62,7 @@ public sealed class BenchmarkOptions
             throw new InputException("Split must be oracle, s or m.");
         }
         if (Limit < 1 || ExperimentBudgetUsd <= 0 || MeditationBudgetUsd <= 0 ||
-            MaxRawCharacters < 100 || MaxRawCharacters > 1000 ||
+            MaxRawCharacters < 100 || MaxObservations < 1 ||
             RetrievalContextCharacters < 4000 || FullHistoryContextCharacters < 4000)
         {
             throw new InputException("Invalid benchmark limits or budgets.");
@@ -89,8 +90,8 @@ public sealed class BenchmarkOptions
         {
             DataDirectory = corpusDirectory,
             RootBase = 3,
-            MaxRawCharacters = 4000,
-            MaxObservations = 1,
+            MaxRawCharacters = MaxRawCharacters,
+            MaxObservations = MaxObservations,
             TimeZoneId = "UTC",
             SchedulerEnabled = variant is not (BenchmarkVariant.FullHistory or BenchmarkVariant.Remember),
             DreamAssimilationEnabled = variant != BenchmarkVariant.Dream,

@@ -10,13 +10,18 @@
 | 파일럿 | ceb54acb. 질문까지 일주일 이상인 짧은 문항으로 실행 흐름과 비용 확인 |
 | 비교 | FullHistory, Remember, Dream, Relations, Meditation |
 | 기하급수 제약 | 모든 기억 조건에서 RootBase=3, 부모 깊이 일치, 3^depth Source root 제약 강제. 해제 옵션 없음 |
-| 입력 | user·assistant 발화를 문장/개행으로 나눔. 긴 구간은 분할. 날짜·role 헤더 포함 최대 1,000 UTF-16 문자 |
+| 입력 | 대화 세션 전체를 remember(raw) 한 번에 전달. 날짜·발화 순서·역할과 원문을 보존. max_raw_characters 기본 64,000 UTF-16 문자 |
+| observation | 전체 대화 맥락에서 0..N개 추출. max_observations 기본 32. 같은 Source에서 나온 기억은 root 하나를 공유 |
 | 시계 | 시간 순서대로 처리. 시간대 없는 날짜는 UTC. 같은 세션 발화에는 임의의 초를 더하지 않음 |
 | 질문 | question_date 이후 세션이 있으면 해당 문항 전체를 invalid_timeline으로 기록 |
 | 격리 | 문항 × 조건마다 독립 저장소. 운영·화면 예제 저장소와 별도 |
 | 답변/채점 | 각각 gpt-5.6-terra / medium / 최대 출력 4,096 토큰 |
 | 전체 예산 | 첫 실험 10달러. 기억·임베딩·Dream·Meditation·답변·채점 포함 |
 | 반복 | 처음은 1회. 다른 반복은 새 출력 폴더에서 별도 비용·그래프 보존 |
+
+2026-09-05 사용자 지적에 따라 대화 세션 전체를 하나의 입력으로 읽는 `longmemeval-v3-session`으로 수정했다. 문장 분할(v1)과 개별 발화 입력(v2)은 이 실험에 사용하지 않는다. 세션 raw에는 원래 순서의 모든 발화가 포함되며, observation은 모델이 대화 맥락에서 추출한 출력이다.
+
+max_raw_characters와 max_observations는 기억 엔진에도 같은 값으로 전달된다. 선택한 세션의 raw가 길이 한도를 초과하면 유료 호출과 실험 저장소 생성 전에 위치·실제 길이·설정 한도를 알려 중단한다. 분할·절삭·자동 건너뛰기는 하지 않는다. max_raw_characters는 엔진의 Recall query/context 길이 한도에도 적용된다.
 
 FullHistory는 날짜와 role이 붙은 원래 발화 전체를 제공한다. Remember는 depth 0만 생성한다. Dream은 consolidation만 수행한다. Relations는 assimilation을 더하고, Meditation은 주간 처리를 더한다. DreamAssimilationEnabled는 기본 true이고 Dream 비교 조건에서만 false로 지정한다.
 
@@ -26,9 +31,9 @@ FullHistory는 날짜와 role이 붙은 원래 발화 전체를 제공한다. Re
 
 ## 시간과 근거
 
-- 다음 관찰을 넣기 전에 지나간 자정마다 시계를 맞추고 Scheduler를 실행한다. 완료된 7일 뒤에 Meditation을 실행한다.
+- 다음 세션을 넣기 전에 지나간 자정마다 시계를 맞추고 Scheduler를 실행한다. 완료된 7일 뒤에 Meditation을 실행한다.
 - 질문 날짜의 아직 끝나지 않은 하루를 강제로 Dream 처리하지 않는다.
-- 관찰이 실패하면 같은 시각에서 remember를 재시도한다. 완료된 Source는 기존 중복 처리로 재사용한다.
+- 세션의 observation 추출이 실패하면 같은 시각에서 remember를 재시도한다. 완료된 Source는 기존 중복 처리로 재사용한다.
 - 날짜 경계에서 실패하면 그 경계의 미완료 실행부터 재개한다. 기존 sequence 상한과 저장된 제안을 유지한다.
 - 답변은 채점 전에 저장한다. 채점 재시도는 저장된 답변을 사용한다. 응답 수신과 체크포인트 사이의 프로세스 종료로 호출이 반복될 가능성까지 없애지는 못한다.
 - 질문 이전에 인위적인 recall을 만들지 않는다. 따라서 과거 질문의 recall이 이후 Dream에 미치는 누적 효과는 이 프로토콜에서 측정하지 않는다.
@@ -38,7 +43,8 @@ FullHistory는 날짜와 role이 붙은 원래 발화 전체를 제공한다. Re
 
 question, answer, question_type, has_answer, answer_session_ids를 기억 입력에 섞지 않는다. 질문·날짜만 Recall/답변에 전달하고 정답·유형·abstention 여부는 채점에만 전달한다. session ID에 정답 위치를 드러내는 이름이 있을 수 있으므로 답변의 발화 ID는 중립적인 순번을 쓴다. 원래 ID는 평가용 매핑에 보존한다.
 
-조각 하나가 Source root 하나다. 동일 세션의 세 조각도 세 root이므로 root 수를 독립 경험 수와 동일시하지 않는다. 추상 기억마다 Source root 수와 원래 세션 수를 함께 기록한다.
+전체 세션 raw 하나가 Source root 하나다. 동일 raw는 세션 ID가 달라도 기존 Source를 재사용한다. 한 Source에서 여러 observation을 생성해도 root는 하나다. 추상 기억마다 Source root 수와 원래 세션 수를 함께 기록한다. 한 세션짜리 원래 파일럿은 observation이 여러 개여도 depth 1의 최소 root 3개를 만족할 수 없다.
+
 
 ## 비용과 재개
 
@@ -46,7 +52,7 @@ question, answer, question_type, has_answer, answer_session_ids를 기억 입력
 
 각 corpus의 api_calls가 유일한 비용 원장이다. 사용량이 확인되지 않은 요청은 예약액을 유지한다. 재시작은 비용을 초기화하지 않는다. 전체 실험과 모든 corpus를 잠근 동안 합산하며, 예약·정산 때는 현재 corpus만 다시 읽는다. 비용은 설정 단가로 계산한 값이며 OpenAI 청구서 그 자체는 아니다.
 
-manifest에는 원본 SHA-256, 선택 문항, 모델·단가·예산·문맥 한도, 프로토콜/프롬프트 버전, 구현 바이너리 식별자가 고정된다. 같은 조건과 구현에서만 재개한다. 변경된 실험은 새 폴더를 사용한다. 기존 manifest만 삭제해서 새 예산을 부여하는 방식은 거부한다.
+manifest에는 원본 SHA-256, 선택 문항, 모델·단가·예산·문맥 한도, 프로토콜/프롬프트 버전, 구현 바이너리 식별자가 고정된다. 같은 조건과 구현에서만 재개한다. 변경된 실험은 새 폴더를 사용한다. 기존 v1 문장 분할 및 v2 발화 단위 결과는 세션 단위 실험으로 재개하거나 합산하지 않는다. 기존 `TestResults/benchmark-pilot`을 보존하고 재실행 시 `output_directory`를 새 경로로 지정한다. 기존 manifest만 삭제해서 새 예산을 부여하는 방식은 거부한다.
 
 입력 순서가 같아도 LLM 출력과 기억 GUID가 달라질 수 있다. 조건별 기억 생성은 독립 실행이며 같은 D0 결과를 공유하지 않는다. 동일 그래프의 재현이나 완전히 통제된 인과 비교를 보장하지 않는다.
 
@@ -91,3 +97,15 @@ retrieval coverage는 답변에 들어간 기억의 provenance에서 찾은 정�
 
 
 첫 실제 실행의 비용과 정성 검토는 [파일럿 결과](11-benchmark-pilot.md)에 기록했다.
+
+## 세션 입력 실제 검증
+
+[session-context-pilot.json](../benchmarks/session-context-pilot.json)은 ceb54acb와 gpt4_f49edff3에 최종 추출 지침을 적용한 Remember 검증이다. 전자는 4개 발화의 단일 대화, 후자는 30개 발화의 세션 3개다. 전체 대화를 입력하고 사건 또는 질문·답변·수정의 맥락에서 observation을 추출한다. 상한은 0.9달러이며 두 사례의 실제 비용은 0.05857484달러였다.
+
+[session-recall-pilot.json](../benchmarks/session-recall-pilot.json)은 지침 수정 도중의 세 번째 단일 대화 실행을 보존한다. [session-integration-pilot.json](../benchmarks/session-integration-pilot.json)은 그때의 지침으로 세션 3개를 첫 유효 주간 Meditation까지 처리하고 중단한 진단 실행이다. 최신 지침으로 검증한 통합 결과로 해석하지 않는다. 진단 실행의 전체 상한은 9달러, 주간 Meditation 상한은 5달러다. 이미 정산한 세 번의 단일 대화 진단 비용 0.02240686달러와 통합 상한 9달러, 최종 Remember 상한 0.9달러의 합계는 10달러 이내다.
+
+각 실행의 manifest·비용 원장은 별도다. 기존 결과는 보존하며 현재 빌드와 조건이 다르면 같은 폴더의 재개를 거부한다. 보존한 바이너리로 결과를 조회하는 방법과 중단 지점·최종 비용은 [세션 실험 결과](13-session-pilot.md)에 기록한다.
+
+세 설정은 Remember 출력 한도를 8,192토큰으로 지정한다. 기본 Terra/Sol 모델과 reasoning effort는 유지한다. 두 사례는 입력·추출·처리 경로를 확인하고 지침을 수정하는 데 사용한 개발 사례다. 별도의 미사용 평가 집합이나 기능별 ablation이 아니므로 정답률을 일반 성능으로 보고하지 않는다. 자동 채점 외에 생성된 모든 observation, 실제 선택된 근거, 원래 대화의 순서와 조건을 직접 대조한다.
+
+Structured Outputs는 배열 형태와 필드 계약을 제한하지만 observation의 의미적 정확성이나 완전성을 보장하지 않는다. 입력 맥락과 생성 결과를 별도로 검토한다. [OpenAI 공식 문서](https://developers.openai.com/api/docs/guides/structured-outputs)

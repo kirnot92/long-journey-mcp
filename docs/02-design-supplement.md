@@ -209,7 +209,7 @@ Weekly Meditation은 **1주일마다** 실행하며, Daily Dream보다 넓은 �
 ```text
 created_at / related_at으로 최근 1주일의 depth >= 1 변경점 수집
     ↓
-처리 우선순위 결정
+Meditation LLM이 전체 후보의 처리 순서를 한 번에 결정
     ↓
 우선순위가 높은 항목부터 넓은 기억 탐색 및 reasoning
     ↓
@@ -217,14 +217,17 @@ created_at / related_at으로 최근 1주일의 depth >= 1 변경점 수집
 ```
 
 - Dream과 달리 Meditation에는 금액 기준 budget을 둔다.
-- N의 실제 금액은 아직 정하지 않았다.
-- 처리 우선순위의 구체적인 기준과 구현은 아직 정하지 않았다.
+- Budget 설정과 비용 집계·중단·이월 동작은 [운영 안내](05-operations.md)를 따른다.
+- 변경점 수집은 `created_at`과 `related_at`의 기간 조건으로 결정한다. Negative relation 수나 최근 변경 시각으로 처리 순서를 정하지 않는다.
+- 수집한 모든 후보와 기존 이월 작업을 한 번의 Meditation LLM priority 판단에 전달한다. 각 작업의 원래 기간과 snapshot을 유지하고, 내용·outgoing relation의 근거를 통해 어디를 먼저 깊게 검토할지 판단한다. Recall/graph 탐색 제한으로 우선순위 후보를 자르지 않는다.
+- LLM은 모든 작업 키를 정확히 한 번씩 포함한 순서를 반환한다. 같은 Memory의 서로 다른 기간 작업은 별도 작업으로 유지한다. 순서는 해당 run의 `run_work.ordinal`에 저장하며, 초기화가 완료된 run을 재개할 때는 다시 판단하지 않는다.
+- Priority 호출 비용도 현재 주간 run의 N달러 budget에 포함한다. 이 호출의 비용 예약이 거절되면 미처리 작업과 `budget_exhausted` 상태를 함께 저장해 다음 주로 이월하며, 임의의 기본 순서로 처리를 시작하지 않는다. API 실패나 잘못된 순서는 기존 비용 기록을 유지한 채 미초기화 run에서 재시도한다.
 - 수집 대상의 위 변경점을 모두 확인한 뒤 우선순위를 정하고, 실제 처리는 N달러 budget 내에서 진행한다.
 - 넓은 탐색에는 최초 설계처럼 필요한 depth-0 Memory와 raw Source 확인이 포함될 수 있다.
 
 변경점을 처리한다는 표현은 기존 Memory의 content나 `derived_from`을 수정한다는 뜻이 아니다. 결과는 최초 설계대로 새로운 Memory이며, strict layering과 Source 기준 root 제약을 지켜야 한다.
 
-작업 순서를 정하기 위한 우선순위가 곧 Memory의 truth, confidence 또는 영구적인 importance 필드가 되는 것은 아니다. 최초 설계의 단순한 Memory 모델을 유지한다.
+작업 순서는 해당 run에서만 사용하는 ephemeral ordering이다. Memory의 truth, confidence 또는 영구적인 importance 필드로 저장하지 않으며, 최초 설계의 단순한 Memory 모델을 유지한다.
 
 ## 10. 기하급수적 제약과 Benchmark의 관계
 
@@ -249,7 +252,8 @@ E. + Geometric depth constraints
 - 중복 `remember` 요청의 반환 형식 및 처리 중/실패 입력의 재시도 방식.
 - 동일 방향의 Memory 쌍에 positive/negative relation을 함께 허용할지 여부.
 - Dream의 일자 경계, timezone, 실행 시각 및 실행을 놓쳤을 때의 처리.
-- Meditation의 N달러 값, 비용 집계·중단 방식, 우선순위 기준 및 미처리 항목의 이월 방식.
 - Dream/Meditation의 공통 revision 운영 여부, 실패 시 재시도 및 embedding 모델 교체의 세부 절차.
+
+Meditation의 우선순위는 §9에서 확정했으며, 금액 설정·비용 집계·중단·이월의 현재 동작은 [운영 안내](05-operations.md)에 정리되어 있다.
 
 이 목록은 지금 모두 결정해야 한다는 뜻이 아니다. 해당 구현 단계를 설계할 때 확정하며, 미답변 제안을 사용자 합의로 간주하지 않는다.

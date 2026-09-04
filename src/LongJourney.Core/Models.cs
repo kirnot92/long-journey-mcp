@@ -117,6 +117,10 @@ public sealed record TraceResult(string MemoryId, IReadOnlyList<MemoryRecord> Me
 public sealed record ObservationProposal(string Content);
 public sealed record RelationProposal(string MemoryId, string RelatedMemoryId, RelationKind Kind);
 public sealed record AbstractionProposal(string Content, IReadOnlyList<string> DerivedFrom);
+/// <summary>A run-local work identity and its original frozen evidence for Meditation ordering.</summary>
+public sealed record MeditationPriorityCandidate(
+    string WorkKey, MemoryRecord Memory, DateTimeOffset PeriodStart, DateTimeOffset PeriodEnd,
+    IReadOnlyList<MemoryRecord> RelatedMemories);
 public sealed record CognitiveResult<T>(T Value, string Model);
 public sealed record EmbeddingVector(string Space, float[] Values);
 /// <summary>The run charged for API calls. Carry work may use evidence from a different, older run.</summary>

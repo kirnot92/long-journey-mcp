@@ -234,6 +234,59 @@ public sealed class OpenAiCognition : ICognition
         return new CognitiveResult<IReadOnlyList<AbstractionProposal>>(proposals, result.Model);
     }
 
+    public async Task<CognitiveResult<IReadOnlyList<string>>> PrioritizeMeditationAsync(
+        IReadOnlyList<MeditationPriorityCandidate> candidates, CallContext context, CancellationToken cancellationToken)
+    {
+        if (candidates.Count == 0)
+        {
+            return new CognitiveResult<IReadOnlyList<string>>(Array.Empty<string>(), _options.Meditation.Model);
+        }
+
+        var candidateKeys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var candidate in candidates)
+        {
+            CheckText(candidate.WorkKey, 256, "Meditation work key");
+            if (!candidateKeys.Add(candidate.WorkKey))
+            {
+                throw new InputException("Duplicate work keys in Meditation priority request.");
+            }
+        }
+        var promptCandidates = PromptMeditationCandidates(candidates);
+        var orderingSchema = StructuredOutputSchema.Array(StructuredOutputSchema.Text(256), candidates.Count);
+        orderingSchema["minItems"] = candidates.Count;
+        var schema = StructuredOutputSchema.Object(("work_keys", orderingSchema));
+        var prompt = """
+            Order all supplied Meditation work items by which changed memory regions are most useful to investigate deeply.
+            Judge their content and evidence: unresolved contradictions, shared conditions, tentative patterns,
+            counterexamples, and alternative explanations. Relation counts or recency alone do not determine this order.
+            Each work item retains its original period and snapshot; different work keys may refer to the same memory.
+            Return every supplied work_key exactly once, in processing order, including lower-utility items.
+            Unlike an optional proposal list, this nonempty priority request must return a complete permutation.
+            This is only a temporary order for the current run, not a permanent importance, truth, or confidence score.
+            Do not propose new memories or relations, score memories, merge work items, or omit any item.
+            """;
+        using var result = await RespondAsync(CognitionRole.Meditation, "meditation_priority", prompt,
+            new { candidates = promptCandidates }, schema, context, cancellationToken);
+        StructuredOutputSchema.RequireObject(result.RootElement, "work_keys");
+
+        var orderedItems = StructuredOutputSchema.ReadArray(result.RootElement, "work_keys", candidates.Count);
+        if (orderedItems.GetArrayLength() != candidates.Count)
+        {
+            throw new InvalidDataException("Meditation priority must include every candidate work key.");
+        }
+        var orderedKeys = new List<string>(candidates.Count);
+        foreach (var item in orderedItems.EnumerateArray())
+        {
+            var key = StructuredOutputSchema.ReadText(item, 256);
+            if (!candidateKeys.Remove(key))
+            {
+                throw new InvalidDataException("Meditation priority contains duplicate or unknown work keys.");
+            }
+            orderedKeys.Add(key);
+        }
+        return new CognitiveResult<IReadOnlyList<string>>(orderedKeys, result.Model);
+    }
+
     public Task<EmbeddingVector> EmbedAsync(string text, CallContext context, CancellationToken cancellationToken)
     {
         CheckText(text, Math.Max(_engine.MaxRawCharacters, _engine.MaxMemoryCharacters), "embedding input");
@@ -420,6 +473,67 @@ public sealed class OpenAiCognition : ICognition
             outgoing_relations = outgoingRelations,
             omitted_relation_count = memory.Relations.Count - outgoingRelations.Count
         };
+    }
+
+    private IReadOnlyList<object> PromptMeditationCandidates(IReadOnlyList<MeditationPriorityCandidate> candidates)
+    {
+        // Priority covers the entire work queue, independently of graph traversal and recall limits.
+        var promptCandidates = new List<object>(candidates.Count);
+        foreach (var candidate in candidates)
+        {
+            var memory = candidate.Memory;
+            CheckText(memory.Id, 128, "memory ID");
+            CheckText(memory.Content, _engine.MaxMemoryCharacters, "memory content");
+            if (memory.Depth < 1 || candidate.PeriodStart >= candidate.PeriodEnd)
+            {
+                throw new InputException("Meditation priority requires depth >= 1 and a valid original period.");
+            }
+            foreach (var parentId in memory.DerivedFrom)
+            {
+                CheckText(parentId, 128, "parent memory ID");
+            }
+            CheckMemories(candidate.RelatedMemories, candidate.RelatedMemories.Count);
+            var relatedById = new Dictionary<string, MemoryRecord>(candidate.RelatedMemories.Count, StringComparer.Ordinal);
+            foreach (var related in candidate.RelatedMemories)
+            {
+                relatedById.Add(related.Id, related);
+            }
+            var outgoingRelations = new List<object>(memory.Relations.Count);
+            foreach (var relation in memory.Relations)
+            {
+                CheckText(relation.RelatedMemoryId, 128, "related memory ID");
+                if (relation.Kind is not (RelationKind.Positive or RelationKind.Negative))
+                {
+                    throw new InputException("Unknown relation kind in Meditation priority request.");
+                }
+                relatedById.TryGetValue(relation.RelatedMemoryId, out var related);
+                outgoingRelations.Add(new
+                {
+                    relation.RelatedMemoryId,
+                    relation.Kind,
+                    relation.RelatedAt,
+                    related_content = related?.Content,
+                    related_depth = related?.Depth
+                });
+            }
+            promptCandidates.Add(new
+            {
+                candidate.WorkKey,
+                candidate.PeriodStart,
+                candidate.PeriodEnd,
+                memory = new
+                {
+                    memory.Id,
+                    memory.Depth,
+                    memory.Content,
+                    memory.CreatedAt,
+                    memory.UniqueSourceRootCount,
+                    memory.DerivedFrom,
+                    outgoing_relations = outgoingRelations
+                }
+            });
+        }
+        return promptCandidates;
     }
 
     private static IReadOnlyList<object> PromptSources(IReadOnlyList<SourceArtifact> sources)

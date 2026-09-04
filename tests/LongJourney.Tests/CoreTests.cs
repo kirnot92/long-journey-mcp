@@ -544,6 +544,13 @@ public sealed class CoreTests
 
     private sealed class TestCognition : ICognition
     {
+        public Task<CognitiveResult<IReadOnlyList<string>>> PrioritizeMeditationAsync(
+            IReadOnlyList<MeditationPriorityCandidate> candidates,
+            CallContext context, CancellationToken cancellationToken)
+        {
+            throw new NotSupportedException();
+        }
+
         public string EmbeddingSpace { get; set; } = "test:3";
         public int ExtractCalls;
         public int ObservationCount = 1;

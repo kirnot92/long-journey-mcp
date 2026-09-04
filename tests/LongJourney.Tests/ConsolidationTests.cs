@@ -2,7 +2,7 @@ using LongJourney.Core;
 
 namespace LongJourney.Tests;
 
-public sealed class ConsolidationTests
+public sealed partial class ConsolidationTests
 {
     [Fact]
     public async Task DreamSeedsCreatedObservationsAndAllDepthRecallsAndFreezesRelationsAndGeneration()
@@ -154,7 +154,7 @@ public sealed class ConsolidationTests
     }
 
     [Fact]
-    public async Task WeeklyChangesIncludeOldOwnerOfNewRelationToObservationAndPrioritizeNegativeChanges()
+    public async Task WeeklyChangesIncludeOldRelationOwnersAndFollowLlmOrderInsteadOfNegativeCounts()
     {
         using var fixture = new ConsolidationFixture();
         var start = fixture.Clock.Now.AddDays(-7);
@@ -165,6 +165,8 @@ public sealed class ConsolidationTests
         var evidence = fixture.Observations(1, start.AddDays(2))[0];
         fixture.Relate(first, evidence, RelationKind.Negative, start.AddDays(3));
         fixture.Relate(second, evidence, RelationKind.Positive, start.AddDays(4));
+        fixture.Cognition.Prioritize = (_, _) =>
+            [$"abstract:{second.Id}", $"abstract:{recent.Id}", $"abstract:{first.Id}"];
 
         var summary = await fixture.Engine.MeditateAsync(start, start.AddDays(7));
 
@@ -172,17 +174,17 @@ public sealed class ConsolidationTests
         var expectedIds = new[] { first.Id, second.Id, recent.Id };
         Array.Sort(expectedIds);
         Assert.Equal(expectedIds, SortedWorkMemoryIds(work));
-        Assert.NotEmpty(work);
-        var firstWork = work[0];
-        foreach (var item in work)
-        {
-            if (item.Ordinal < firstWork.Ordinal)
-            {
-                firstWork = item;
-            }
-        }
-
-        Assert.Equal(first.Id, firstWork.MemoryId);
+        Assert.Equal(second.Id, work[0].MemoryId);
+        Assert.Equal(recent.Id, work[1].MemoryId);
+        Assert.Equal(first.Id, work[2].MemoryId);
+        Assert.Equal(second.Id, fixture.Cognition.Neighborhoods[0][0].Id);
+        Assert.Equal(recent.Id, fixture.Cognition.Neighborhoods[1][0].Id);
+        Assert.Equal(first.Id, fixture.Cognition.Neighborhoods[2][0].Id);
+        var priorityCandidates = Assert.Single(fixture.Cognition.PriorityBatches);
+        Assert.Equal(3, priorityCandidates.Count);
+        var changedOwner = Assert.Single(priorityCandidates, candidate => candidate.Memory.Id == first.Id);
+        Assert.Equal(evidence.Id, Assert.Single(changedOwner.RelatedMemories).Id);
+        Assert.Equal(start.AddDays(3), Assert.Single(changedOwner.Memory.Relations).RelatedAt);
         Assert.DoesNotContain(work, x => x.MemoryId == evidence.Id);
         Assert.All(fixture.Cognition.Roles, x => Assert.Equal(CognitionRole.Meditation, x));
         Assert.All(fixture.Cognition.SourceBatches, x => Assert.NotEmpty(x));

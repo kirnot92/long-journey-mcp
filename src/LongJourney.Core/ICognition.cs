@@ -41,6 +41,12 @@ public interface ICognition
         CognitionRole role,
         CallContext context,
         CancellationToken cancellationToken);
+
+    /// <summary>Returns every candidate work key exactly once, in this run's processing order.</summary>
+    Task<CognitiveResult<IReadOnlyList<string>>> PrioritizeMeditationAsync(
+        IReadOnlyList<MeditationPriorityCandidate> candidates,
+        CallContext context,
+        CancellationToken cancellationToken);
 }
 
 /// <summary>Reserves the maximum cost before a call and settles known usage even if its proposal is rejected.</summary>

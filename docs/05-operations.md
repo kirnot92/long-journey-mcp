@@ -92,9 +92,13 @@ Daily Dream은 해당 날짜에 생성된 모든 depth 0 기억과 해당 날짜
 
 주간 구간은 최초 corpus 활동 날짜를 기준으로 7일씩 이어진다. 특정 요일에 고정한 달력 주가 아니며, 각 일일 구간 처리가 끝난 뒤 그에 대응하는 7일 구간이 완성되면 Meditation을 실행한다. 서버가 며칠 꺼졌다면 놓친 날짜와 주간 구간을 차례로 따라잡는다. 미설정 budget 때문에 주간 구간을 버리거나 완료로 표시하지 않는다. 이때 budget을 나중에 설정하면 밀린 여러 주가 각각 N달러의 별도 budget으로 실행될 수 있다.
 
-Meditation은 구간 안에서 생성된 depth >= 1 기억과, 그 기간에 outgoing relation이 추가된 depth >= 1 기억을 수집한다. Relation target이 depth 0이어도 owner가 depth >= 1이면 포함한다. 새 negative relation 수, 전체 negative relation 수, 최근 변경 시각 순으로 우선 처리한다. 이 우선순위는 작업 순서일 뿐 기억의 영구적인 importance 필드가 아니다. 필요하면 더 넓은 그래프, depth 0, raw Source를 확인한다.
+Meditation은 구간 안에서 생성된 depth >= 1 기억과, 그 기간에 outgoing relation이 추가된 depth >= 1 기억을 결정적으로 수집한다. Relation target이 depth 0이어도 owner가 depth >= 1이면 포함한다. 수집한 모든 후보와 기존 이월 작업의 처리 순서는 설정된 Meditation LLM이 한 번의 priority 판단으로 결정한다. 각 후보의 내용과 outgoing relation의 종류·추가 시각·대상 내용을 전달하며, negative relation 수나 최근 변경 시각으로 정렬하지 않는다. Priority 후보에는 Recall/graph 탐색 개수 제한을 적용하지 않는다. 개별 작업에서는 기존처럼 더 넓은 그래프, depth 0, raw Source를 확인할 수 있다.
+
+Priority 결과는 모든 작업 키를 정확히 한 번씩 포함해야 한다. 같은 Memory라도 원래 실행이 다른 작업은 별도 키와 원래 기간·snapshot을 유지한다. 이 순서는 해당 run의 `run_work.ordinal`에 저장하며, 초기화가 완료된 run을 재개할 때는 저장된 순서를 그대로 사용한다. Memory의 영구적인 importance, truth, confidence는 만들지 않는다.
 
 금액 N은 `Engine:MeditationBudgetUsd`로 설정한다. 미설정 시 서버가 안내 로그를 남기고 주간 작업을 보류한다. budget에 걸려 남은 작업은 이후 주간 실행으로 이월한다. 이월 작업의 원래 snapshot/proposal은 유지하며 새 주의 budget을 사용한다.
+
+Priority 호출도 현재 run의 budget에 비용을 예약하고 정산한다. 예약이 거절되면 미처리 queue 저장과 run의 `budget_exhausted` 전환을 하나의 트랜잭션으로 처리해 다음 주로 이월한다. 순서가 확정되지 않은 작업을 기본 정렬로 처리하지 않는다. API 실패나 누락·중복·알 수 없는 작업 키가 있는 응답은 실패로 처리하고, 다음 재시도에서 미초기화 run의 priority를 다시 판단한다. 알려진 사용량은 정산하고 불명확한 사용량의 예약은 유지하는 기존 비용 규칙을 따른다.
 
 각 Dream/Meditation은 시작 시 graph sequence 상한과 revision을 고정한다. 실행 중 생성된 기억·relation·recall을 같은 실행의 재료로 재사용하지 않는다. 반환된 proposal은 저장한 뒤 Core validation을 통해 적용한다. 중단 후 재시도는 저장된 proposal과 작업 키로 중복 적용을 방지한다. 서로 다른 run이 생성한 의미상 유사 abstraction은 자동 병합하지 않는다.
 

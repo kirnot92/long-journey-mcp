@@ -46,7 +46,10 @@ public interface IMemoryStore : IUsageLedger
         decimal? budgetUsd);
 
     IReadOnlyList<RunRecord> GetRuns();
+    bool AreWorkItemsInitialized(long runId);
     void EnsureWorkItems(long runId, IReadOnlyList<WorkSeed> items);
+    /// <summary>Atomically preserves unranked candidates for carry and closes a run that cannot afford priority.</summary>
+    void FinishUnprioritizedMeditation(long runId, IReadOnlyList<WorkSeed> items, DateTimeOffset now);
     IReadOnlyList<RunWorkItem> GetWorkItems(long runId);
     void SaveWorkProposal(long runId, string key, string proposalJson, string model);
     void CompleteWork(long runId, string key);

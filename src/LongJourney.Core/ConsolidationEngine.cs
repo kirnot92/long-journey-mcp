@@ -62,9 +62,9 @@ public sealed class ConsolidationEngine(
             {
                 EnsureDreamWorkItems(run, frozenEvidence);
             }
-            else
+            else if (!await EnsureMeditationWorkItemsAsync(run, frozenEvidence, frozenRuns, cancellationToken))
             {
-                EnsureMeditationWorkItems(run, frozenEvidence, frozenRuns);
+                return ReadRunSummary(run.Id, "budget_exhausted");
             }
 
             try
@@ -188,11 +188,17 @@ public sealed class ConsolidationEngine(
         store.EnsureWorkItems(run.Id, work);
     }
 
-    private void EnsureMeditationWorkItems(
+    private async Task<bool> EnsureMeditationWorkItemsAsync(
         RunRecord run,
         GraphSnapshot snapshot,
-        Dictionary<long, FrozenRunEvidence> frozenRuns)
+        Dictionary<long, FrozenRunEvidence> frozenRuns,
+        CancellationToken cancellationToken)
     {
+        if (store.AreWorkItemsInitialized(run.Id))
+        {
+            return true;
+        }
+
         var candidates = new List<MeditationCandidate>();
         foreach (var memory in snapshot.Memories)
         {
@@ -202,10 +208,10 @@ public sealed class ConsolidationEngine(
             }
 
             var workSeed = new WorkSeed($"abstract:{memory.Id}", "consolidation", memory.Id, 0);
-            candidates.Add(CreateMeditationCandidate(workSeed, memory, run));
+            candidates.Add(CreateMeditationCandidate(workSeed, memory, run, snapshot.ById));
         }
 
-        // Unfinished work keeps the evidence and priority period of its original run.
+        // Unfinished work keeps its original evidence, even when the same memory changed again this week.
         foreach (var previousRun in store.GetRuns())
         {
             if (previousRun.Kind != RunKind.Meditation ||
@@ -232,22 +238,64 @@ public sealed class ConsolidationEngine(
 
                 var carryKey = $"carry:{previousRun.Id}:{pendingItem.Key}";
                 var workSeed = new WorkSeed(carryKey, "carry", pendingItem.MemoryId, 0);
-                candidates.Add(CreateMeditationCandidate(workSeed, memory, previousRun));
+                candidates.Add(CreateMeditationCandidate(workSeed, memory, previousRun, originalMemories));
             }
         }
 
-        // Priority orders changed regions for this run; it is not a stored importance or truth score.
-        candidates.Sort(CompareMeditationPriority);
-        var orderedWork = new List<WorkSeed>();
+        // A stable input order helps reproducibility; only the LLM determines processing order.
+        candidates.Sort((left, right) => StringComparer.Ordinal.Compare(left.Seed.Key, right.Seed.Key));
+        var priorityCandidates = new List<MeditationPriorityCandidate>();
+        var seedsByKey = new Dictionary<string, WorkSeed>(StringComparer.Ordinal);
         foreach (var candidate in candidates)
         {
-            orderedWork.Add(candidate.Seed with
-            {
-                Ordinal = orderedWork.Count
-            });
+            priorityCandidates.Add(candidate.Evidence);
+            seedsByKey.Add(candidate.Seed.Key, candidate.Seed);
         }
 
+        if (candidates.Count == 0)
+        {
+            store.EnsureWorkItems(run.Id, []);
+            return true;
+        }
+
+        CognitiveResult<IReadOnlyList<string>> priority;
+        try
+        {
+            priority = await cognition.PrioritizeMeditationAsync(
+                priorityCandidates, new CallContext(run.Id), cancellationToken);
+        }
+        catch (BudgetExceededException)
+        {
+            var pendingWork = new List<WorkSeed>();
+            foreach (var candidate in candidates)
+            {
+                pendingWork.Add(candidate.Seed with { Ordinal = pendingWork.Count });
+            }
+
+            // Closing and preserving the queue must be atomic: a retry may never process this unranked order.
+            store.FinishUnprioritizedMeditation(run.Id, pendingWork, timeProvider.GetUtcNow());
+            return false;
+        }
+
+        if (priority.Value.Count != candidates.Count)
+        {
+            throw new InvalidDataException("Meditation priority must contain every candidate work key exactly once.");
+        }
+
+        var orderedWork = new List<WorkSeed>();
+        foreach (var key in priority.Value)
+        {
+            if (key is null || !seedsByKey.Remove(key, out var seed))
+            {
+                throw new InvalidDataException("Meditation priority contains a duplicate or unknown work key.");
+            }
+
+            orderedWork.Add(seed with { Ordinal = orderedWork.Count });
+        }
+
+        // Persist the validated order before honoring cancellation or processing any work.
         store.EnsureWorkItems(run.Id, orderedWork);
+        return true;
     }
 
     private async Task ProcessOriginalWorkAsync(
@@ -711,52 +759,22 @@ public sealed class ConsolidationEngine(
     private static MeditationCandidate CreateMeditationCandidate(
         WorkSeed seed,
         MemoryRecord memory,
-        RunRecord period)
+        RunRecord period,
+        IReadOnlyDictionary<string, MemoryRecord> memoriesById)
     {
-        var recentNegativeCount = 0;
-        var negativeCount = 0;
-        var lastChangedAt = memory.CreatedAt;
+        var relatedMemories = new List<MemoryRecord>();
+        var relatedIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var relation in memory.Relations)
         {
-            if (relation.Kind == RelationKind.Negative)
+            if (relatedIds.Add(relation.RelatedMemoryId))
             {
-                negativeCount++;
-                if (InPeriod(relation.RelatedAt, period))
-                {
-                    recentNegativeCount++;
-                }
-            }
-
-            if (relation.RelatedAt > lastChangedAt)
-            {
-                lastChangedAt = relation.RelatedAt;
+                relatedMemories.Add(memoriesById[relation.RelatedMemoryId]);
             }
         }
 
-        return new MeditationCandidate(seed, recentNegativeCount, negativeCount, lastChangedAt);
-    }
-
-    private static int CompareMeditationPriority(MeditationCandidate left, MeditationCandidate right)
-    {
-        var recentNegativeComparison = right.RecentNegativeCount.CompareTo(left.RecentNegativeCount);
-        if (recentNegativeComparison != 0)
-        {
-            return recentNegativeComparison;
-        }
-
-        var negativeComparison = right.NegativeCount.CompareTo(left.NegativeCount);
-        if (negativeComparison != 0)
-        {
-            return negativeComparison;
-        }
-
-        var lastChangedComparison = right.LastChangedAt.CompareTo(left.LastChangedAt);
-        if (lastChangedComparison != 0)
-        {
-            return lastChangedComparison;
-        }
-
-        return StringComparer.Ordinal.Compare(left.Seed.Key, right.Seed.Key);
+        var evidence = new MeditationPriorityCandidate(
+            seed.Key, memory, period.PeriodStart, period.PeriodEnd, relatedMemories);
+        return new MeditationCandidate(seed, evidence);
     }
 
     private static int CompareWorkOrder(RunWorkItem left, RunWorkItem right)
@@ -826,9 +844,7 @@ public sealed class ConsolidationEngine(
 
     private sealed record MeditationCandidate(
         WorkSeed Seed,
-        int RecentNegativeCount,
-        int NegativeCount,
-        DateTimeOffset LastChangedAt);
+        MeditationPriorityCandidate Evidence);
 
     private sealed record SavedProposal(
         IReadOnlyList<string> AllowedCandidateIds,

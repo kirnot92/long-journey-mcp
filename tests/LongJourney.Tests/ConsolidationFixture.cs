@@ -132,6 +132,8 @@ internal sealed class ConsolidationCognition : ICognition
     public Func<MemoryRecord, IReadOnlyList<MemoryRecord>, IReadOnlyList<RelationProposal>> Assimilate { get; set; } = (_, _) => [];
     public Func<IReadOnlyList<MemoryRecord>, IReadOnlyList<SourceArtifact>, CognitionRole, IReadOnlyList<AbstractionProposal>> Abstract { get; set; } = (_, _, _) => [];
     public Func<string, CallContext, EmbeddingVector> Embedding { get; set; } = (_, _) => ConsolidationFixture.Vector;
+    public Func<IReadOnlyList<MeditationPriorityCandidate>, CallContext, IReadOnlyList<string>>? Prioritize { get; set; }
+    public List<IReadOnlyList<MeditationPriorityCandidate>> PriorityBatches { get; } = [];
     public List<string> Calls { get; } = [];
     public List<CallContext> Contexts { get; } = [];
     public List<IReadOnlyList<MemoryRecord>> Neighborhoods { get; } = [];
@@ -140,6 +142,32 @@ internal sealed class ConsolidationCognition : ICognition
     public int EmbeddingCalls
     {
         get; private set;
+    }
+
+    public Task<CognitiveResult<IReadOnlyList<string>>> PrioritizeMeditationAsync(
+        IReadOnlyList<MeditationPriorityCandidate> candidates,
+        CallContext context, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Calls.Add("priority");
+        Contexts.Add(context);
+        PriorityBatches.Add(candidates);
+        IReadOnlyList<string> orderedKeys;
+        if (Prioritize is not null)
+        {
+            orderedKeys = Prioritize(candidates, context);
+        }
+        else
+        {
+            var keys = new List<string>();
+            foreach (var candidate in candidates)
+            {
+                keys.Add(candidate.WorkKey);
+            }
+            orderedKeys = keys;
+        }
+
+        return Task.FromResult(new CognitiveResult<IReadOnlyList<string>>(orderedKeys, "fake"));
     }
 
     public Task<EmbeddingVector> EmbedAsync(string text, CallContext context, CancellationToken cancellationToken)

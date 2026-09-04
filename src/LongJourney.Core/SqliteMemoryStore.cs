@@ -484,18 +484,61 @@ public sealed partial class SqliteMemoryStore : IMemoryStore
         return result;
     }
 
+    public bool AreWorkItemsInitialized(long runId)
+    {
+        using var db = OpenConnection();
+        return ReadWorkInitialized(db, null, runId);
+    }
+
+    private static bool ReadWorkInitialized(SqliteConnection db, SqliteTransaction? tx, long runId)
+    {
+        var initializedValue = ExecuteScalar(db, tx,
+            "SELECT work_initialized FROM runs WHERE id=$id", ("$id", runId));
+        if (initializedValue is null)
+        {
+            throw new InvariantException("Work refers to a missing run.");
+        }
+
+        return Convert.ToInt32(initializedValue, CultureInfo.InvariantCulture) != 0;
+    }
+
     public void EnsureWorkItems(long runId, IReadOnlyList<WorkSeed> items)
     {
         using var db = OpenConnection();
         using var tx = db.BeginTransaction();
-        var initializedValue = ExecuteScalar(db, tx,
-            "SELECT work_initialized FROM runs WHERE id=$id", ("$id", runId));
-        var workInitialized = Convert.ToInt32(initializedValue, CultureInfo.InvariantCulture) != 0;
-        if (workInitialized)
+        if (ReadWorkInitialized(db, tx, runId))
         {
             return;
         }
 
+        InsertWorkItems(db, tx, runId, items);
+        tx.Commit();
+    }
+
+    public void FinishUnprioritizedMeditation(long runId, IReadOnlyList<WorkSeed> items, DateTimeOffset now)
+    {
+        using var db = OpenConnection();
+        using var tx = db.BeginTransaction();
+        var eligible = ExecuteScalar(db, tx, """
+            SELECT COUNT(*) FROM runs
+            WHERE id=$id AND kind='meditation' AND status='running' AND work_initialized=0
+            """, ("$id", runId));
+        if (Convert.ToInt32(eligible, CultureInfo.InvariantCulture) != 1)
+        {
+            throw new InvariantException("Only an uninitialized, running Meditation can finish without priority.");
+        }
+
+        // These ordinals identify pending carry work, never a processing order for this closed run.
+        InsertWorkItems(db, tx, runId, items);
+        ExecuteNonQuery(db, tx, """
+            UPDATE runs SET status='budget_exhausted', finished_at=$at WHERE id=$id
+            """, ("$at", FormatTimestamp(now)), ("$id", runId));
+        tx.Commit();
+    }
+
+    private static void InsertWorkItems(
+        SqliteConnection db, SqliteTransaction tx, long runId, IReadOnlyList<WorkSeed> items)
+    {
         foreach (var item in items)
         {
             ExecuteNonQuery(db, tx, "INSERT INTO run_work(run_id,work_key,phase,memory_id,ordinal,status) VALUES($run,$key,$phase,$memory,$ordinal,'pending')",
@@ -503,7 +546,6 @@ public sealed partial class SqliteMemoryStore : IMemoryStore
         }
 
         ExecuteNonQuery(db, tx, "UPDATE runs SET work_initialized=1 WHERE id=$id", ("$id", runId));
-        tx.Commit();
     }
 
     public IReadOnlyList<RunWorkItem> GetWorkItems(long runId)

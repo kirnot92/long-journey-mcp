@@ -324,6 +324,14 @@ public sealed partial class ServerTests
 
     private sealed class CannedCognition : ICognition
     {
+        public Task<CognitiveResult<IReadOnlyList<string>>> PrioritizeMeditationAsync(
+            IReadOnlyList<MeditationPriorityCandidate> candidates,
+            CallContext context, CancellationToken cancellationToken)
+        {
+            Calls++;
+            throw new InvalidOperationException("Scheduler is disabled for HTTP tests.");
+        }
+
         public int Extractions
         {
             get; private set;

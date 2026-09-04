@@ -165,17 +165,17 @@ public sealed class ConsolidationEngine(
         consolidationSeeds.Sort(CompareCreationOrder);
 
         // Complete every new observation's assimilation before processing abstractions.
-        var work = new List<WorkSeed>();
+        var work = new WorkSeed[createdObservations.Count + consolidationSeeds.Count];
         var ordinal = 0;
         foreach (var observation in createdObservations)
         {
-            work.Add(new WorkSeed($"assimilate:{observation.Id}", "assimilation", observation.Id, ordinal));
+            work[ordinal] = new WorkSeed($"assimilate:{observation.Id}", "assimilation", observation.Id, ordinal);
             ordinal++;
         }
 
         foreach (var seed in consolidationSeeds)
         {
-            work.Add(new WorkSeed($"abstract:{seed.Id}", "consolidation", seed.Id, ordinal));
+            work[ordinal] = new WorkSeed($"abstract:{seed.Id}", "consolidation", seed.Id, ordinal);
             ordinal++;
         }
 
@@ -228,13 +228,13 @@ public sealed class ConsolidationEngine(
 
         // Priority orders changed regions for this run; it is not a stored importance or truth score.
         candidates.Sort(CompareMeditationPriority);
-        var orderedWork = new List<WorkSeed>();
+        var orderedWork = new WorkSeed[candidates.Count];
         for (var index = 0; index < candidates.Count; index++)
         {
-            orderedWork.Add(candidates[index].Seed with
+            orderedWork[index] = candidates[index].Seed with
             {
                 Ordinal = index
-            });
+            };
         }
 
         store.EnsureWorkItems(run.Id, orderedWork);
@@ -317,8 +317,7 @@ public sealed class ConsolidationEngine(
             seed, candidates, chargedCallContext, cancellationToken);
 
         var candidateIds = GetMemoryIds(candidates);
-        var relations = new List<RelationProposal>(result.Value).ToArray();
-        var proposal = new SavedProposal(candidateIds, relations, []);
+        var proposal = new SavedProposal(candidateIds, result.Value, []);
         return new CognitiveResult<SavedProposal>(proposal, result.Model);
     }
 
@@ -344,8 +343,7 @@ public sealed class ConsolidationEngine(
             neighborhood, sources, role, chargedCallContext, cancellationToken);
 
         var candidateIds = GetMemoryIds(neighborhood);
-        var abstractions = new List<AbstractionProposal>(result.Value).ToArray();
-        var proposal = new SavedProposal(candidateIds, [], abstractions);
+        var proposal = new SavedProposal(candidateIds, [], result.Value);
         return new CognitiveResult<SavedProposal>(proposal, result.Model);
     }
 
@@ -358,7 +356,7 @@ public sealed class ConsolidationEngine(
         CancellationToken cancellationToken)
     {
         var allowedIds = new HashSet<string>(savedProposal.AllowedCandidateIds, StringComparer.Ordinal);
-        for (var index = 0; index < savedProposal.Relations.Length; index++)
+        for (var index = 0; index < savedProposal.Relations.Count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var proposal = savedProposal.Relations[index];
@@ -392,7 +390,7 @@ public sealed class ConsolidationEngine(
         CallContext chargedCallContext,
         CancellationToken cancellationToken)
     {
-        for (var index = 0; index < savedProposal.Abstractions.Length; index++)
+        for (var index = 0; index < savedProposal.Abstractions.Count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var proposal = savedProposal.Abstractions[index];
@@ -456,7 +454,7 @@ public sealed class ConsolidationEngine(
             AddCandidate(memory.Id);
         }
 
-        return candidates.ToArray();
+        return candidates;
     }
 
     private async Task<IReadOnlyList<MemoryRecord>> RetrieveNeighborhoodAsync(
@@ -567,7 +565,7 @@ public sealed class ConsolidationEngine(
             }
         }
 
-        return selectedMemories.ToArray();
+        return selectedMemories;
     }
 
     private IReadOnlyList<SourceArtifact> ReadSourceEvidence(
@@ -601,13 +599,13 @@ public sealed class ConsolidationEngine(
             }
         }
 
-        var sources = new List<SourceArtifact>();
-        foreach (var sourceId in sourceIdsInVisitOrder)
+        var sources = new SourceArtifact[sourceIdsInVisitOrder.Count];
+        for (var index = 0; index < sourceIdsInVisitOrder.Count; index++)
         {
-            sources.Add(store.ReadSource(sourceId));
+            sources[index] = store.ReadSource(sourceIdsInVisitOrder[index]);
         }
 
-        return sources.ToArray();
+        return sources;
     }
 
     private RunSummary ReadRunSummary(long runId, string status)
@@ -807,7 +805,7 @@ public sealed class ConsolidationEngine(
         DateTimeOffset LastChangedAt);
 
     private sealed record SavedProposal(
-        string[] AllowedCandidateIds,
-        RelationProposal[] Relations,
-        AbstractionProposal[] Abstractions);
+        IReadOnlyList<string> AllowedCandidateIds,
+        IReadOnlyList<RelationProposal> Relations,
+        IReadOnlyList<AbstractionProposal> Abstractions);
 }

@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -35,27 +36,99 @@ public enum CognitionRole
 /// <summary>An outgoing edge; reading it never implies a reverse relation.</summary>
 public sealed record MemoryRelation(string RelatedMemoryId, RelationKind Kind, DateTimeOffset RelatedAt, long Sequence);
 
-public sealed record MemoryRecord(
-    string Id, int Depth, string Content, string? SourceRef,
-    IReadOnlyList<string> DerivedFrom, IReadOnlyList<MemoryRelation> Relations,
-    DateTimeOffset CreatedAt, long DreamRevision, DateTimeOffset? LastRecalledAt,
-    string CreatedByModel, int UniqueSourceRootCount, long Sequence)
+/// <summary>Owns fixed provenance and outgoing relations. Recall-only copies share those immutable collections.</summary>
+public sealed record MemoryRecord
 {
-    public IReadOnlyList<string> PositiveRelated => GetRelatedMemoryIds(RelationKind.Positive);
-    public IReadOnlyList<string> NegativeRelated => GetRelatedMemoryIds(RelationKind.Negative);
+    public string Id { get; }
+    public int Depth { get; }
+    public string Content { get; }
+    public string? SourceRef { get; }
+    public IReadOnlyList<string> DerivedFrom { get; }
+    public IReadOnlyList<MemoryRelation> Relations { get; }
+    public DateTimeOffset CreatedAt { get; }
+    public long DreamRevision { get; }
+    public DateTimeOffset? LastRecalledAt { get; init; }
+    public string CreatedByModel { get; }
+    public int UniqueSourceRootCount { get; }
+    public long Sequence { get; }
+    public IReadOnlyList<string> PositiveRelated { get; }
+    public IReadOnlyList<string> NegativeRelated { get; }
 
-    private string[] GetRelatedMemoryIds(RelationKind kind)
+    [JsonConstructor]
+    public MemoryRecord(
+        string id,
+        int depth,
+        string content,
+        string? sourceRef,
+        IReadOnlyList<string> derivedFrom,
+        IReadOnlyList<MemoryRelation> relations,
+        DateTimeOffset createdAt,
+        long dreamRevision,
+        DateTimeOffset? lastRecalledAt,
+        string createdByModel,
+        int uniqueSourceRootCount,
+        long sequence)
     {
-        var memoryIds = new List<string>();
-        foreach (var relation in Relations)
+        ArgumentNullException.ThrowIfNull(derivedFrom);
+        ArgumentNullException.ThrowIfNull(relations);
+
+        Id = id;
+        Depth = depth;
+        Content = content;
+        SourceRef = sourceRef;
+        CreatedAt = createdAt;
+        DreamRevision = dreamRevision;
+        LastRecalledAt = lastRecalledAt;
+        CreatedByModel = createdByModel;
+        UniqueSourceRootCount = uniqueSourceRootCount;
+        Sequence = sequence;
+
+        // Copy once at the ownership boundary, so later caller mutations cannot invalidate the cached views.
+        var parentIds = new string[derivedFrom.Count];
+        for (var index = 0; index < parentIds.Length; index++)
         {
-            if (relation.Kind == kind)
+            parentIds[index] = derivedFrom[index];
+        }
+        DerivedFrom = Array.AsReadOnly(parentIds);
+
+        var ownedRelations = new MemoryRelation[relations.Count];
+        var positiveCount = 0;
+        var negativeCount = 0;
+        for (var index = 0; index < ownedRelations.Length; index++)
+        {
+            var relation = relations[index];
+            ownedRelations[index] = relation;
+            if (relation.Kind == RelationKind.Positive)
             {
-                memoryIds.Add(relation.RelatedMemoryId);
+                positiveCount++;
+            }
+            else if (relation.Kind == RelationKind.Negative)
+            {
+                negativeCount++;
             }
         }
 
-        return memoryIds.ToArray();
+        var positiveIds = new string[positiveCount];
+        var negativeIds = new string[negativeCount];
+        var positiveIndex = 0;
+        var negativeIndex = 0;
+        foreach (var relation in ownedRelations)
+        {
+            if (relation.Kind == RelationKind.Positive)
+            {
+                positiveIds[positiveIndex] = relation.RelatedMemoryId;
+                positiveIndex++;
+            }
+            else if (relation.Kind == RelationKind.Negative)
+            {
+                negativeIds[negativeIndex] = relation.RelatedMemoryId;
+                negativeIndex++;
+            }
+        }
+
+        Relations = Array.AsReadOnly(ownedRelations);
+        PositiveRelated = Array.AsReadOnly(positiveIds);
+        NegativeRelated = Array.AsReadOnly(negativeIds);
     }
 }
 
@@ -80,21 +153,39 @@ public sealed record RunRecord(
     DateTimeOffset StartedAt, long MemoryHighWater, long RelationHighWater, long RecallHighWater,
     string Status, decimal? BudgetUsd);
 
-public sealed record GraphSnapshot(IReadOnlyList<MemoryRecord> Memories, IReadOnlyList<RecallEvent> RecallEvents)
+/// <summary>Owns a fixed set of memories and recalls, indexed once when the snapshot is constructed.</summary>
+public sealed record GraphSnapshot
 {
-    // Build an index on demand without changing or caching the evidence snapshot.
-    public IReadOnlyDictionary<string, MemoryRecord> ById
-    {
-        get
-        {
-            var memoriesById = new Dictionary<string, MemoryRecord>(StringComparer.Ordinal);
-            foreach (var memory in Memories)
-            {
-                memoriesById.Add(memory.Id, memory);
-            }
+    public IReadOnlyList<MemoryRecord> Memories { get; }
+    public IReadOnlyList<RecallEvent> RecallEvents { get; }
+    public IReadOnlyDictionary<string, MemoryRecord> ById { get; }
 
-            return memoriesById;
+    [JsonConstructor]
+    public GraphSnapshot(
+        IReadOnlyList<MemoryRecord> memories,
+        IReadOnlyList<RecallEvent> recallEvents)
+    {
+        ArgumentNullException.ThrowIfNull(memories);
+        ArgumentNullException.ThrowIfNull(recallEvents);
+
+        var ownedMemories = new MemoryRecord[memories.Count];
+        var memoriesById = new Dictionary<string, MemoryRecord>(memories.Count, StringComparer.Ordinal);
+        for (var index = 0; index < ownedMemories.Length; index++)
+        {
+            var memory = memories[index];
+            ownedMemories[index] = memory;
+            memoriesById.Add(memory.Id, memory);
         }
+
+        var ownedRecalls = new RecallEvent[recallEvents.Count];
+        for (var index = 0; index < ownedRecalls.Length; index++)
+        {
+            ownedRecalls[index] = recallEvents[index];
+        }
+
+        Memories = Array.AsReadOnly(ownedMemories);
+        RecallEvents = Array.AsReadOnly(ownedRecalls);
+        ById = new ReadOnlyDictionary<string, MemoryRecord>(memoriesById);
     }
 }
 

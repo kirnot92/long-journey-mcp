@@ -27,9 +27,10 @@ public sealed class MemorySearch(
         ValidateEmbeddingSpace(queryVector);
 
         var resultLimit = limit ?? options.SearchCandidates;
-        var lexicalRanking = ReadLexicalRanking(query, candidates, snapshot, depth, resultLimit);
-        var semanticRanking = ReadSemanticRanking(queryVector, candidates, resultLimit);
-        return MergeRankings(lexicalRanking, semanticRanking, candidates, resultLimit);
+        var candidatesById = depth is null ? snapshot.ById : BuildCandidateIndex(candidates);
+        var lexicalRanking = ReadLexicalRanking(query, candidatesById, snapshot, depth, resultLimit);
+        var semanticRanking = ReadSemanticRanking(queryVector, candidatesById, resultLimit);
+        return MergeRankings(lexicalRanking, semanticRanking, candidatesById, resultLimit);
     }
 
     public async Task<IReadOnlyList<MemoryRecord>> NearestAsync(
@@ -46,20 +47,24 @@ public sealed class MemorySearch(
             return [];
         }
 
-        var memoriesToEmbed = new List<MemoryRecord>(candidates);
-        memoriesToEmbed.Add(seed);
+        var memoriesToEmbed = new MemoryRecord[candidates.Count + 1];
+        for (var index = 0; index < candidates.Count; index++)
+        {
+            memoriesToEmbed[index] = candidates[index];
+        }
+        memoriesToEmbed[candidates.Count] = seed;
         await GenerateAndSaveMissingEmbeddingsAsync(memoriesToEmbed, context, cancellationToken);
 
         var seedVector = store.GetEmbedding(seed.Id, cognition.EmbeddingSpace)!;
         var candidatesById = BuildCandidateIndex(candidates);
-        var rankedIds = ReadSemanticRanking(seedVector, candidates, limit ?? options.NeighborhoodSize);
-        var results = new List<MemoryRecord>();
-        foreach (var memoryId in rankedIds)
+        var rankedIds = ReadSemanticRanking(seedVector, candidatesById, limit ?? options.NeighborhoodSize);
+        var results = new MemoryRecord[rankedIds.Length];
+        for (var index = 0; index < rankedIds.Length; index++)
         {
-            results.Add(candidatesById[memoryId]);
+            results[index] = candidatesById[rankedIds[index]];
         }
 
-        return results.ToArray();
+        return results;
     }
 
     public Task ReindexAsync(CallContext context, CancellationToken cancellationToken)
@@ -105,17 +110,11 @@ public sealed class MemorySearch(
 
     private List<string> ReadLexicalRanking(
         string query,
-        IReadOnlyList<MemoryRecord> candidates,
+        IReadOnlyDictionary<string, MemoryRecord> candidatesById,
         GraphSnapshot snapshot,
         int? depth,
         int limit)
     {
-        var candidateIds = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var candidate in candidates)
-        {
-            candidateIds.Add(candidate.Id);
-        }
-
         var memoryHighWater = snapshot.Memories[0].Sequence;
         foreach (var memory in snapshot.Memories)
         {
@@ -131,7 +130,7 @@ public sealed class MemorySearch(
         var rankedIds = new List<string>();
         foreach (var memoryId in lexicalMatches)
         {
-            if (candidateIds.Contains(memoryId))
+            if (candidatesById.ContainsKey(memoryId))
             {
                 rankedIds.Add(memoryId);
             }
@@ -142,15 +141,9 @@ public sealed class MemorySearch(
 
     private string[] ReadSemanticRanking(
         EmbeddingVector query,
-        IReadOnlyList<MemoryRecord> candidates,
+        IReadOnlyDictionary<string, MemoryRecord> candidatesById,
         int limit)
     {
-        var candidateIds = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var candidate in candidates)
-        {
-            candidateIds.Add(candidate.Id);
-        }
-
         var storedEmbeddings = store.GetEmbeddings(cognition.EmbeddingSpace);
         if (limit <= 0)
         {
@@ -160,7 +153,7 @@ public sealed class MemorySearch(
         var scores = new List<MemoryScore>();
         foreach (var storedEmbedding in storedEmbeddings)
         {
-            if (!candidateIds.Contains(storedEmbedding.MemoryId))
+            if (!candidatesById.ContainsKey(storedEmbedding.MemoryId))
             {
                 continue;
             }
@@ -170,50 +163,41 @@ public sealed class MemorySearch(
         }
         scores.Sort(CompareScores);
 
-        var rankedIds = new List<string>();
-        foreach (var score in scores)
+        var resultCount = Math.Min(limit, scores.Count);
+        var rankedIds = new string[resultCount];
+        for (var index = 0; index < resultCount; index++)
         {
-            if (rankedIds.Count >= limit)
-            {
-                break;
-            }
-
-            rankedIds.Add(score.MemoryId);
+            rankedIds[index] = scores[index].MemoryId;
         }
 
-        return rankedIds.ToArray();
+        return rankedIds;
     }
 
     private static IReadOnlyList<MemoryRecord> MergeRankings(
         IReadOnlyList<string> lexicalRanking,
         IReadOnlyList<string> semanticRanking,
-        IReadOnlyList<MemoryRecord> candidates,
+        IReadOnlyDictionary<string, MemoryRecord> candidatesById,
         int limit)
     {
         var combinedScores = new Dictionary<string, double>(StringComparer.Ordinal);
         AddReciprocalRankScores(lexicalRanking, combinedScores);
         AddReciprocalRankScores(semanticRanking, combinedScores);
 
-        var candidatesById = BuildCandidateIndex(candidates);
-        var rankedScores = new List<MemoryScore>();
+        var rankedScores = new List<MemoryScore>(combinedScores.Count);
         foreach (var entry in combinedScores)
         {
             rankedScores.Add(new MemoryScore(entry.Key, entry.Value));
         }
         rankedScores.Sort(CompareScores);
 
-        var results = new List<MemoryRecord>();
-        foreach (var rankedMemory in rankedScores)
+        var resultCount = Math.Clamp(limit, 0, rankedScores.Count);
+        var results = new MemoryRecord[resultCount];
+        for (var index = 0; index < resultCount; index++)
         {
-            if (results.Count >= limit)
-            {
-                break;
-            }
-
-            results.Add(candidatesById[rankedMemory.MemoryId]);
+            results[index] = candidatesById[rankedScores[index].MemoryId];
         }
 
-        return results.ToArray();
+        return results;
     }
 
     private static void AddReciprocalRankScores(
@@ -240,11 +224,16 @@ public sealed class MemorySearch(
         return StringComparer.Ordinal.Compare(left.MemoryId, right.MemoryId);
     }
 
-    private static List<MemoryRecord> FindCandidates(
+    private static IReadOnlyList<MemoryRecord> FindCandidates(
         GraphSnapshot snapshot,
         int? depth,
         string? excludedMemoryId = null)
     {
+        if (depth is null && excludedMemoryId is null)
+        {
+            return snapshot.Memories;
+        }
+
         var candidates = new List<MemoryRecord>();
         foreach (var memory in snapshot.Memories)
         {
@@ -267,7 +256,7 @@ public sealed class MemorySearch(
     private static Dictionary<string, MemoryRecord> BuildCandidateIndex(
         IReadOnlyList<MemoryRecord> candidates)
     {
-        var candidatesById = new Dictionary<string, MemoryRecord>(StringComparer.Ordinal);
+        var candidatesById = new Dictionary<string, MemoryRecord>(candidates.Count, StringComparer.Ordinal);
         foreach (var candidate in candidates)
         {
             candidatesById.Add(candidate.Id, candidate);
@@ -316,5 +305,5 @@ public sealed class MemorySearch(
         return dotProduct / Math.Sqrt(leftSquaredNorm * rightSquaredNorm);
     }
 
-    private sealed record MemoryScore(string MemoryId, double Score);
+    private readonly record struct MemoryScore(string MemoryId, double Score);
 }

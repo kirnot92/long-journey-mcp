@@ -1,6 +1,10 @@
 namespace LongJourney.Core;
 
 /// <summary>Produces proposals and embeddings; the store alone validates and commits graph changes.</summary>
+/// <remarks>
+/// Returned results are complete and may be retained without copying. Implementations must not mutate
+/// returned collections, proposal parent lists, or embedding buffers. Sharing immutable data is allowed.
+/// </remarks>
 public interface ICognition
 {
     string EmbeddingSpace

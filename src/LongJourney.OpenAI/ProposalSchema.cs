@@ -70,22 +70,15 @@ internal static class ProposalSchema
         }
     }
 
-    public static JsonElement[] ReadArray(JsonElement value, string name, int limit)
+    // The array view is borrowed from the response document and consumed before that document is disposed.
+    public static JsonElement ReadArray(JsonElement value, string name, int limit)
     {
         if (!value.TryGetProperty(name, out var array) || array.ValueKind != JsonValueKind.Array ||
             array.GetArrayLength() > limit)
         {
             throw new InvalidDataException("OpenAI proposal has an invalid array.");
         }
-
-        var items = new JsonElement[array.GetArrayLength()];
-        var index = 0;
-        foreach (var item in array.EnumerateArray())
-        {
-            items[index] = item;
-            index++;
-        }
-        return items;
+        return array;
     }
 
     public static string ReadText(JsonElement value, int maximumLength)

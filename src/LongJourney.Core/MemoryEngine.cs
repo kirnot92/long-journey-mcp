@@ -115,17 +115,17 @@ public sealed class MemoryEngine(
         var recalledAt = timeProvider.GetUtcNow();
         store.RecordRecall(selectedIds, recalledAt);
 
-        var recalledMemories = new List<MemoryRecord>();
-        foreach (var memoryId in selectedIds)
+        var recalledMemories = new MemoryRecord[selectedIds.Count];
+        for (var index = 0; index < selectedIds.Count; index++)
         {
-            var memory = candidatesById[memoryId];
-            recalledMemories.Add(memory with
+            var memory = candidatesById[selectedIds[index]];
+            recalledMemories[index] = memory with
             {
                 LastRecalledAt = recalledAt
-            });
+            };
         }
 
-        return new RecallResult(recalledMemories.ToArray());
+        return new RecallResult(recalledMemories);
     }
 
     public TraceResult Trace(string memoryId)
@@ -169,13 +169,15 @@ public sealed class MemoryEngine(
             }
         }
 
-        var sources = new List<SourceArtifact>();
+        var sources = new SourceArtifact[sourceIds.Count];
+        var sourceIndex = 0;
         foreach (var sourceId in sourceIds)
         {
-            sources.Add(store.ReadSource(sourceId));
+            sources[sourceIndex] = store.ReadSource(sourceId);
+            sourceIndex++;
         }
 
-        return new TraceResult(memoryId, memories, sources.ToArray());
+        return new TraceResult(memoryId, memories, sources);
     }
 
     private async Task<RememberResult> ExtractAndSaveObservationsAsync(
@@ -196,9 +198,10 @@ public sealed class MemoryEngine(
                 throw new InvariantException("Provider returned too many observations.");
             }
 
-            var observations = new List<NewObservation>();
-            foreach (var proposal in proposals.Value)
+            var observations = new NewObservation[proposals.Value.Count];
+            for (var index = 0; index < proposals.Value.Count; index++)
             {
+                var proposal = proposals.Value[index];
                 if (string.IsNullOrWhiteSpace(proposal.Content) ||
                     proposal.Content.Length > options.MaxMemoryCharacters)
                 {
@@ -211,7 +214,7 @@ public sealed class MemoryEngine(
                     throw new InvariantException("Embedding model space mismatch.");
                 }
 
-                observations.Add(new NewObservation(proposal.Content, proposals.Model, embedding));
+                observations[index] = new NewObservation(proposal.Content, proposals.Model, embedding);
             }
 
             store.CompleteSource(artifact.Source.Id, observations, timeProvider.GetUtcNow());

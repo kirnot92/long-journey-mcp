@@ -168,7 +168,7 @@ public sealed class SqliteMemoryStore : IMemoryStore
         return new RememberResult(sourceId, duplicate, sourceMemories, source.Status);
     }
 
-    private static MemoryRecord[] SelectSourceMemories(
+    private static IReadOnlyList<MemoryRecord> SelectSourceMemories(
         IReadOnlyList<MemoryRecord> memories,
         string sourceId)
     {
@@ -181,7 +181,7 @@ public sealed class SqliteMemoryStore : IMemoryStore
             }
         }
 
-        return sourceMemories.ToArray();
+        return sourceMemories;
     }
 
     public bool ClaimSource(string sourceId)

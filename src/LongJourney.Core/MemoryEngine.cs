@@ -115,14 +115,14 @@ public sealed class MemoryEngine(
         var recalledAt = timeProvider.GetUtcNow();
         store.RecordRecall(selectedIds, recalledAt);
 
-        var recalledMemories = new MemoryRecord[selectedIds.Count];
-        for (var index = 0; index < selectedIds.Count; index++)
+        var recalledMemories = new List<MemoryRecord>();
+        foreach (var memoryId in selectedIds)
         {
-            var memory = candidatesById[selectedIds[index]];
-            recalledMemories[index] = memory with
+            var memory = candidatesById[memoryId];
+            recalledMemories.Add(memory with
             {
                 LastRecalledAt = recalledAt
-            };
+            });
         }
 
         return new RecallResult(recalledMemories);
@@ -169,12 +169,10 @@ public sealed class MemoryEngine(
             }
         }
 
-        var sources = new SourceArtifact[sourceIds.Count];
-        var sourceIndex = 0;
+        var sources = new List<SourceArtifact>();
         foreach (var sourceId in sourceIds)
         {
-            sources[sourceIndex] = store.ReadSource(sourceId);
-            sourceIndex++;
+            sources.Add(store.ReadSource(sourceId));
         }
 
         return new TraceResult(memoryId, memories, sources);
@@ -198,10 +196,9 @@ public sealed class MemoryEngine(
                 throw new InvariantException("Provider returned too many observations.");
             }
 
-            var observations = new NewObservation[proposals.Value.Count];
-            for (var index = 0; index < proposals.Value.Count; index++)
+            var observations = new List<NewObservation>();
+            foreach (var proposal in proposals.Value)
             {
-                var proposal = proposals.Value[index];
                 if (string.IsNullOrWhiteSpace(proposal.Content) ||
                     proposal.Content.Length > options.MaxMemoryCharacters)
                 {
@@ -214,7 +211,7 @@ public sealed class MemoryEngine(
                     throw new InvariantException("Embedding model space mismatch.");
                 }
 
-                observations[index] = new NewObservation(proposal.Content, proposals.Model, embedding);
+                observations.Add(new NewObservation(proposal.Content, proposals.Model, embedding));
             }
 
             store.CompleteSource(artifact.Source.Id, observations, timeProvider.GetUtcNow());

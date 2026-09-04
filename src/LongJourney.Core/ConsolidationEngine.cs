@@ -165,18 +165,15 @@ public sealed class ConsolidationEngine(
         consolidationSeeds.Sort(CompareCreationOrder);
 
         // Complete every new observation's assimilation before processing abstractions.
-        var work = new WorkSeed[createdObservations.Count + consolidationSeeds.Count];
-        var ordinal = 0;
+        var work = new List<WorkSeed>();
         foreach (var observation in createdObservations)
         {
-            work[ordinal] = new WorkSeed($"assimilate:{observation.Id}", "assimilation", observation.Id, ordinal);
-            ordinal++;
+            work.Add(new WorkSeed($"assimilate:{observation.Id}", "assimilation", observation.Id, work.Count));
         }
 
         foreach (var seed in consolidationSeeds)
         {
-            work[ordinal] = new WorkSeed($"abstract:{seed.Id}", "consolidation", seed.Id, ordinal);
-            ordinal++;
+            work.Add(new WorkSeed($"abstract:{seed.Id}", "consolidation", seed.Id, work.Count));
         }
 
         store.EnsureWorkItems(run.Id, work);
@@ -228,13 +225,13 @@ public sealed class ConsolidationEngine(
 
         // Priority orders changed regions for this run; it is not a stored importance or truth score.
         candidates.Sort(CompareMeditationPriority);
-        var orderedWork = new WorkSeed[candidates.Count];
-        for (var index = 0; index < candidates.Count; index++)
+        var orderedWork = new List<WorkSeed>();
+        foreach (var candidate in candidates)
         {
-            orderedWork[index] = candidates[index].Seed with
+            orderedWork.Add(candidate.Seed with
             {
-                Ordinal = index
-            };
+                Ordinal = orderedWork.Count
+            });
         }
 
         store.EnsureWorkItems(run.Id, orderedWork);
@@ -599,10 +596,10 @@ public sealed class ConsolidationEngine(
             }
         }
 
-        var sources = new SourceArtifact[sourceIdsInVisitOrder.Count];
-        for (var index = 0; index < sourceIdsInVisitOrder.Count; index++)
+        var sources = new List<SourceArtifact>();
+        foreach (var sourceId in sourceIdsInVisitOrder)
         {
-            sources[index] = store.ReadSource(sourceIdsInVisitOrder[index]);
+            sources.Add(store.ReadSource(sourceId));
         }
 
         return sources;
@@ -757,12 +754,12 @@ public sealed class ConsolidationEngine(
         return StringComparer.Ordinal.Compare(left.Id, right.Id);
     }
 
-    private static string[] GetMemoryIds(IReadOnlyList<MemoryRecord> memories)
+    private static IReadOnlyList<string> GetMemoryIds(IReadOnlyList<MemoryRecord> memories)
     {
-        var memoryIds = new string[memories.Count];
-        for (var index = 0; index < memories.Count; index++)
+        var memoryIds = new List<string>();
+        foreach (var memory in memories)
         {
-            memoryIds[index] = memories[index].Id;
+            memoryIds.Add(memory.Id);
         }
 
         return memoryIds;

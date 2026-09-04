@@ -47,21 +47,18 @@ public sealed class MemorySearch(
             return [];
         }
 
-        var memoriesToEmbed = new MemoryRecord[candidates.Count + 1];
-        for (var index = 0; index < candidates.Count; index++)
-        {
-            memoriesToEmbed[index] = candidates[index];
-        }
-        memoriesToEmbed[candidates.Count] = seed;
+        var memoriesToEmbed = new List<MemoryRecord>(candidates.Count + 1);
+        memoriesToEmbed.AddRange(candidates);
+        memoriesToEmbed.Add(seed);
         await GenerateAndSaveMissingEmbeddingsAsync(memoriesToEmbed, context, cancellationToken);
 
         var seedVector = store.GetEmbedding(seed.Id, cognition.EmbeddingSpace)!;
         var candidatesById = BuildCandidateIndex(candidates);
         var rankedIds = ReadSemanticRanking(seedVector, candidatesById, limit ?? options.NeighborhoodSize);
-        var results = new MemoryRecord[rankedIds.Length];
-        for (var index = 0; index < rankedIds.Length; index++)
+        var results = new List<MemoryRecord>();
+        foreach (var memoryId in rankedIds)
         {
-            results[index] = candidatesById[rankedIds[index]];
+            results.Add(candidatesById[memoryId]);
         }
 
         return results;
@@ -139,7 +136,7 @@ public sealed class MemorySearch(
         return rankedIds;
     }
 
-    private string[] ReadSemanticRanking(
+    private IReadOnlyList<string> ReadSemanticRanking(
         EmbeddingVector query,
         IReadOnlyDictionary<string, MemoryRecord> candidatesById,
         int limit)
@@ -163,11 +160,15 @@ public sealed class MemorySearch(
         }
         scores.Sort(CompareScores);
 
-        var resultCount = Math.Min(limit, scores.Count);
-        var rankedIds = new string[resultCount];
-        for (var index = 0; index < resultCount; index++)
+        var rankedIds = new List<string>();
+        foreach (var score in scores)
         {
-            rankedIds[index] = scores[index].MemoryId;
+            if (rankedIds.Count >= limit)
+            {
+                break;
+            }
+
+            rankedIds.Add(score.MemoryId);
         }
 
         return rankedIds;
@@ -190,11 +191,15 @@ public sealed class MemorySearch(
         }
         rankedScores.Sort(CompareScores);
 
-        var resultCount = Math.Clamp(limit, 0, rankedScores.Count);
-        var results = new MemoryRecord[resultCount];
-        for (var index = 0; index < resultCount; index++)
+        var results = new List<MemoryRecord>();
+        foreach (var rankedMemory in rankedScores)
         {
-            results[index] = candidatesById[rankedScores[index].MemoryId];
+            if (results.Count >= limit)
+            {
+                break;
+            }
+
+            results.Add(candidatesById[rankedMemory.MemoryId]);
         }
 
         return results;

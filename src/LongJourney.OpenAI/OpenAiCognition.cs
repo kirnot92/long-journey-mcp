@@ -64,14 +64,12 @@ public sealed class OpenAiCognition : ICognition
         ProposalSchema.RequireObject(result.RootElement, "observations");
 
         var observationItems = ProposalSchema.ReadArray(result.RootElement, "observations", _engine.MaxObservations);
-        var observations = new ObservationProposal[observationItems.GetArrayLength()];
-        var observationIndex = 0;
+        var observations = new List<ObservationProposal>(observationItems.GetArrayLength());
         foreach (var item in observationItems.EnumerateArray())
         {
             ProposalSchema.RequireObject(item, "content");
             var content = ProposalSchema.ReadText(item.GetProperty("content"), _engine.MaxMemoryCharacters);
-            observations[observationIndex] = new ObservationProposal(content);
-            observationIndex++;
+            observations.Add(new ObservationProposal(content));
         }
         return new CognitiveResult<IReadOnlyList<ObservationProposal>>(observations, result.Model);
     }
@@ -114,12 +112,10 @@ public sealed class OpenAiCognition : ICognition
         ProposalSchema.RequireObject(result.RootElement, "memory_ids");
 
         var selectedItems = ProposalSchema.ReadArray(result.RootElement, "memory_ids", _engine.RecallLimit);
-        var selectedIds = new string[selectedItems.GetArrayLength()];
-        var selectionIndex = 0;
+        var selectedIds = new List<string>(selectedItems.GetArrayLength());
         foreach (var item in selectedItems.EnumerateArray())
         {
-            selectedIds[selectionIndex] = ProposalSchema.ReadText(item, 128);
-            selectionIndex++;
+            selectedIds.Add(ProposalSchema.ReadText(item, 128));
         }
         var seenIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var selectedId in selectedIds)
@@ -181,8 +177,7 @@ public sealed class OpenAiCognition : ICognition
         ProposalSchema.RequireObject(result.RootElement, "relations");
 
         var relationItems = ProposalSchema.ReadArray(result.RootElement, "relations", maximumRelations);
-        var relations = new RelationProposal[relationItems.GetArrayLength()];
-        var relationIndex = 0;
+        var relations = new List<RelationProposal>(relationItems.GetArrayLength());
         foreach (var item in relationItems.EnumerateArray())
         {
             ProposalSchema.RequireObject(item, "memory_id", "related_memory_id", "kind");
@@ -198,8 +193,7 @@ public sealed class OpenAiCognition : ICognition
             {
                 throw new InvalidDataException("Assimilation proposed an unknown or reversed relation.");
             }
-            relations[relationIndex] = new RelationProposal(owner, target, kind);
-            relationIndex++;
+            relations.Add(new RelationProposal(owner, target, kind));
         }
         var seenRelations = new HashSet<RelationProposal>();
         foreach (var relation in relations)
@@ -275,21 +269,18 @@ public sealed class OpenAiCognition : ICognition
         ProposalSchema.RequireObject(result.RootElement, "abstractions");
 
         var abstractionItems = ProposalSchema.ReadArray(result.RootElement, "abstractions", _engine.NeighborhoodSize);
-        var proposals = new AbstractionProposal[abstractionItems.GetArrayLength()];
-        var proposalIndex = 0;
+        var proposals = new List<AbstractionProposal>(abstractionItems.GetArrayLength());
         foreach (var item in abstractionItems.EnumerateArray())
         {
             ProposalSchema.RequireObject(item, "content", "derived_from");
             var content = ProposalSchema.ReadText(item.GetProperty("content"), _engine.MaxMemoryCharacters);
             var parentItems = ProposalSchema.ReadArray(item, "derived_from", neighborhood.Count);
-            var parentIds = new string[parentItems.GetArrayLength()];
-            var parentIndex = 0;
+            var parentIds = new List<string>(parentItems.GetArrayLength());
             foreach (var parentItem in parentItems.EnumerateArray())
             {
-                parentIds[parentIndex] = ProposalSchema.ReadText(parentItem, 128);
-                parentIndex++;
+                parentIds.Add(ProposalSchema.ReadText(parentItem, 128));
             }
-            if (parentIds.Length == 0)
+            if (parentIds.Count == 0)
             {
                 throw new InvalidDataException("Abstraction has empty, duplicate, or unknown parent IDs.");
             }
@@ -301,8 +292,7 @@ public sealed class OpenAiCognition : ICognition
                     throw new InvalidDataException("Abstraction has empty, duplicate, or unknown parent IDs.");
                 }
             }
-            proposals[proposalIndex] = new AbstractionProposal(content, parentIds);
-            proposalIndex++;
+            proposals.Add(new AbstractionProposal(content, parentIds));
         }
         return new CognitiveResult<IReadOnlyList<AbstractionProposal>>(proposals, result.Model);
     }
@@ -612,7 +602,7 @@ public sealed class OpenAiCognition : ICognition
         }
     }
 
-    private object[] PromptMemories(IReadOnlyList<MemoryRecord> memories, IReadOnlyList<string>? extraIds = null)
+    private IReadOnlyList<object> PromptMemories(IReadOnlyList<MemoryRecord> memories, IReadOnlyList<string>? extraIds = null)
     {
         var visibleIds = new HashSet<string>(StringComparer.Ordinal);
         foreach (var memory in memories)
@@ -627,10 +617,10 @@ public sealed class OpenAiCognition : ICognition
             }
         }
 
-        var promptMemories = new object[memories.Count];
-        for (var index = 0; index < memories.Count; index++)
+        var promptMemories = new List<object>(memories.Count);
+        foreach (var memory in memories)
         {
-            promptMemories[index] = PromptMemory(memories[index], visibleIds);
+            promptMemories.Add(PromptMemory(memory, visibleIds));
         }
         return promptMemories;
     }
@@ -659,10 +649,14 @@ public sealed class OpenAiCognition : ICognition
         IReadOnlyList<string> parents = memory.DerivedFrom;
         if (parents.Count > _engine.MeditationGraphLimit)
         {
-            var cappedParents = new string[_engine.MeditationGraphLimit];
-            for (var index = 0; index < cappedParents.Length; index++)
+            var cappedParents = new List<string>(_engine.MeditationGraphLimit);
+            foreach (var parent in parents)
             {
-                cappedParents[index] = parents[index];
+                if (cappedParents.Count == _engine.MeditationGraphLimit)
+                {
+                    break;
+                }
+                cappedParents.Add(parent);
             }
             parents = cappedParents;
         }
@@ -680,17 +674,16 @@ public sealed class OpenAiCognition : ICognition
         };
     }
 
-    private static object[] PromptSources(IReadOnlyList<SourceArtifact> sources)
+    private static IReadOnlyList<object> PromptSources(IReadOnlyList<SourceArtifact> sources)
     {
-        var promptSources = new object[sources.Count];
-        for (var index = 0; index < sources.Count; index++)
+        var promptSources = new List<object>(sources.Count);
+        foreach (var source in sources)
         {
-            var source = sources[index];
-            promptSources[index] = new
+            promptSources.Add(new
             {
                 source_id = source.Source.Id,
                 raw = source.Raw
-            };
+            });
         }
         return promptSources;
     }

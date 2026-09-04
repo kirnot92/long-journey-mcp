@@ -10,7 +10,7 @@ namespace LongJourney.Server;
 public static class AppHost
 {
     // The callback is an in-process test seam; production always uses OpenAiCognition.
-    public static WebApplication Build(string[] args, Action<WebApplicationBuilder>? configure = null)
+    public static WebApplication Build(IReadOnlyList<string> args, Action<WebApplicationBuilder>? configure = null)
     {
         var disableScheduler = false;
         var hostArguments = new List<string>();

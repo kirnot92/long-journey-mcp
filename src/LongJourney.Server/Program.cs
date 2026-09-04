@@ -15,7 +15,7 @@ foreach (var argument in args)
     }
 }
 
-await using var app = AppHost.Build(hostArguments.ToArray());
+await using var app = AppHost.Build(hostArguments);
 if (reindex)
 {
     await RecoverSourcesAndReindexAsync(app);

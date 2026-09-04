@@ -83,52 +83,26 @@ public sealed record MemoryRecord
         UniqueSourceRootCount = uniqueSourceRootCount;
         Sequence = sequence;
 
-        // Copy once at the ownership boundary, so later caller mutations cannot invalidate the cached views.
-        var parentIds = new string[derivedFrom.Count];
-        for (var index = 0; index < parentIds.Length; index++)
-        {
-            parentIds[index] = derivedFrom[index];
-        }
-        DerivedFrom = Array.AsReadOnly(parentIds);
+        // Own the inputs so callers cannot change the cached relation views.
+        DerivedFrom = new List<string>(derivedFrom).AsReadOnly();
+        Relations = new List<MemoryRelation>(relations).AsReadOnly();
 
-        var ownedRelations = new MemoryRelation[relations.Count];
-        var positiveCount = 0;
-        var negativeCount = 0;
-        for (var index = 0; index < ownedRelations.Length; index++)
-        {
-            var relation = relations[index];
-            ownedRelations[index] = relation;
-            if (relation.Kind == RelationKind.Positive)
-            {
-                positiveCount++;
-            }
-            else if (relation.Kind == RelationKind.Negative)
-            {
-                negativeCount++;
-            }
-        }
-
-        var positiveIds = new string[positiveCount];
-        var negativeIds = new string[negativeCount];
-        var positiveIndex = 0;
-        var negativeIndex = 0;
-        foreach (var relation in ownedRelations)
+        var positiveIds = new List<string>();
+        var negativeIds = new List<string>();
+        foreach (var relation in Relations)
         {
             if (relation.Kind == RelationKind.Positive)
             {
-                positiveIds[positiveIndex] = relation.RelatedMemoryId;
-                positiveIndex++;
+                positiveIds.Add(relation.RelatedMemoryId);
             }
             else if (relation.Kind == RelationKind.Negative)
             {
-                negativeIds[negativeIndex] = relation.RelatedMemoryId;
-                negativeIndex++;
+                negativeIds.Add(relation.RelatedMemoryId);
             }
         }
 
-        Relations = Array.AsReadOnly(ownedRelations);
-        PositiveRelated = Array.AsReadOnly(positiveIds);
-        NegativeRelated = Array.AsReadOnly(negativeIds);
+        PositiveRelated = positiveIds.AsReadOnly();
+        NegativeRelated = negativeIds.AsReadOnly();
     }
 }
 
@@ -168,23 +142,14 @@ public sealed record GraphSnapshot
         ArgumentNullException.ThrowIfNull(memories);
         ArgumentNullException.ThrowIfNull(recallEvents);
 
-        var ownedMemories = new MemoryRecord[memories.Count];
-        var memoriesById = new Dictionary<string, MemoryRecord>(memories.Count, StringComparer.Ordinal);
-        for (var index = 0; index < ownedMemories.Length; index++)
+        Memories = new List<MemoryRecord>(memories).AsReadOnly();
+        RecallEvents = new List<RecallEvent>(recallEvents).AsReadOnly();
+
+        var memoriesById = new Dictionary<string, MemoryRecord>(Memories.Count, StringComparer.Ordinal);
+        foreach (var memory in Memories)
         {
-            var memory = memories[index];
-            ownedMemories[index] = memory;
             memoriesById.Add(memory.Id, memory);
         }
-
-        var ownedRecalls = new RecallEvent[recallEvents.Count];
-        for (var index = 0; index < ownedRecalls.Length; index++)
-        {
-            ownedRecalls[index] = recallEvents[index];
-        }
-
-        Memories = Array.AsReadOnly(ownedMemories);
-        RecallEvents = Array.AsReadOnly(ownedRecalls);
         ById = new ReadOnlyDictionary<string, MemoryRecord>(memoriesById);
     }
 }

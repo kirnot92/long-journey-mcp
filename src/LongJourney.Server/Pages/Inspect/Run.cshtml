@@ -1,0 +1,55 @@
+@page "/inspect/runs/{id:long}"
+@model LongJourney.Server.Pages.Inspect.RunModel
+@{
+    ViewData["Title"] = "실행 상세";
+}
+@if (Model.Data is { } data)
+{
+    var run = data.Run.Run;
+    <a class="back" asp-page="/Inspect/Runs">← 실행 기록</a>
+    <div class="page-heading"><div><p class="eyebrow">RUN / @run.Id</p><h1>@InspectionPageModel.Kind(run.Kind) #@run.Id</h1></div><span class="badge">@run.Status</span></div>
+    <dl class="metadata">
+        <dt>처리 기간 [시작, 끝)</dt><dd>@InspectionPageModel.At(run.PeriodStart) → @InspectionPageModel.At(run.PeriodEnd)</dd>
+        <dt>시작 시각</dt><dd>@InspectionPageModel.At(run.StartedAt)</dd>
+        <dt>종료 기록 시각</dt><dd>@InspectionPageModel.At(data.Run.FinishedAt)</dd>
+        <dt>저장된 상태</dt><dd>@run.Status</dd>
+        <dt>Work 초기화</dt><dd>@(data.Run.WorkInitialized ? "완료" : "아직 초기화되지 않음")</dd>
+        <dt>고정 입력 상한</dt><dd>Memory @run.MemoryHighWater · Relation @run.RelationHighWater · Recall @run.RecallHighWater</dd>
+        <dt>예산</dt><dd>@(run.BudgetUsd is { } budget ? InspectionPageModel.Usd(budget) : "금액 제한 없음")</dd>
+        <dt>출력 기억</dt><dd><a asp-page="/Inspect/Index" asp-route-revision="@run.Id">@data.OutputMemories 개 · 생성 revision @run.Id</a></dd>
+    </dl>
+    <h2>이 실행에 청구된 비용</h2>
+    <section class="stats costs">
+        <div><span>정산된 실제액</span><strong>@InspectionPageModel.Usd(data.Cost.ActualUsd)</strong></div>
+        <div><span>미정산 예약액 · @data.Cost.UnsettledCalls 건</span><strong>@InspectionPageModel.Usd(data.Cost.UnsettledReservedUsd)</strong></div>
+        <div><span>예산 차감 합계</span><strong>@InspectionPageModel.Usd(data.Cost.AccountedUsd)</strong></div>
+    </section>
+    <p class="hint">로컬 장부 기준입니다. 예산 차감 합계는 정산된 실제액 + 미정산 예약액입니다. 정산된 호출의 과거 예약액은 중복 합산하지 않습니다.</p>
+    <p class="notice">이월 작업의 제안·근거·출력은 원래 실행에 속하며, API 비용은 호출 당시 실행에 청구됩니다. work별 비용과 이월 완료 시각은 별도 기록이 없어 표시하지 않습니다. 상태와 종료 시각은 DB에 저장된 값입니다.</p>
+    <h2>Work 진행 상태</h2>
+    <p class="section-meta">현재 저장된 complete @data.CompletedWork / @data.Work.Total 개</p>
+    @if (data.Work.Items.Count == 0)
+    {
+        <p class="empty">표시할 작업이 없습니다.</p>
+    }
+    @foreach (var work in data.Work.Items)
+    {
+        <article class="panel">
+            <div class="row-meta"><span class="badge">@work.Phase</span><span>@work.Status</span></div>
+            <h3><a asp-page="/Inspect/Work" asp-route-id="@run.Id" asp-route-key="@work.Key">@work.Key</a></h3>
+            <p>Seed <a asp-page="/Inspect/Memory" asp-route-id="@work.MemoryId">@work.MemoryId</a></p>
+            <p class="hint">순서 @work.Ordinal · @(work.HasProposal ? "제안 저장됨" : "이 work에 저장된 제안 없음") · 모델 @(work.Model ?? "기록 없음")</p>
+        </article>
+    }
+    <nav class="pager" aria-label="Work 페이지">
+        @if (data.Work.HasPrevious)
+        {
+            <a asp-page="/Inspect/Run" asp-route-id="@run.Id" asp-route-p="@(data.Work.Page - 1)">← 이전</a>
+        }
+        <span>@data.Work.Page / @data.Work.Pages 페이지</span>
+        @if (data.Work.HasNext)
+        {
+            <a asp-page="/Inspect/Run" asp-route-id="@run.Id" asp-route-p="@(data.Work.Page + 1)">다음 →</a>
+        }
+    </nav>
+}

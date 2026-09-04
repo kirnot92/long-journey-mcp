@@ -1,0 +1,42 @@
+@page "/inspect/runs/{id:long}/work"
+@model LongJourney.Server.Pages.Inspect.WorkModel
+@{
+    ViewData["Title"] = "Work 상세";
+}
+@if (Model.Data is { } data)
+{
+    <a class="back" asp-page="/Inspect/Run" asp-route-id="@data.Work.RunId">← 실행 #@data.Work.RunId</a>
+    <div class="page-heading"><div><p class="eyebrow">WORK / SAVED PROPOSAL</p><h1>작업 상세</h1></div><span class="badge">@data.Work.Status</span></div>
+    <dl class="metadata">
+        <dt>저장된 실행</dt><dd><a asp-page="/Inspect/Run" asp-route-id="@data.Work.RunId">#@data.Work.RunId</a></dd>
+        <dt>Work key</dt><dd>@data.Work.Key</dd>
+        <dt>단계 · 순서</dt><dd>@data.Work.Phase · @data.Work.Ordinal</dd>
+        <dt>Seed</dt><dd><a asp-page="/Inspect/Memory" asp-route-id="@data.Work.MemoryId">@data.Work.MemoryId</a></dd>
+        <dt>모델</dt><dd>@(data.Work.Model ?? "기록 없음")</dd>
+    </dl>
+    @if (data.Origin is { } origin)
+    {
+        <p class="notice">이월 작업입니다. 원래 실행 #@origin.RunId 의 <a asp-page="/Inspect/Work" asp-route-id="@origin.RunId" asp-route-key="@origin.Key">@origin.Key</a>에서 저장된 제안과 거절 사유를 확인하세요. 이 원본 연결은 저장된 carry key를 사용합니다.</p>
+    }
+    <h2>저장된 제안</h2>
+    @if (data.Work.ProposalJson is null)
+    {
+        <p class="empty">이 work에 저장된 제안이 없습니다.</p>
+    }
+    else
+    {
+        <p class="hint">저장된 JSON 원문입니다. 제안의 존재는 적용 또는 완료를 의미하지 않습니다.</p>
+        <pre class="raw panel"><code>@data.Work.ProposalJson</code></pre>
+    }
+    <h2>거절 사유</h2>
+    @if (data.Rejections.Count == 0)
+    {
+        <p class="empty">저장된 거절 기록이 없습니다.</p>
+    }
+    <ul class="link-list">
+    @foreach (var rejection in data.Rejections)
+    {
+        <li><strong>제안 인덱스 @rejection.ProposalIndex</strong><p class="content-text">@rejection.Reason</p></li>
+    }
+    </ul>
+}

@@ -4,4 +4,7 @@
     <ProjectReference Include="../LongJourney.OpenAI/LongJourney.OpenAI.csproj" />
     <PackageReference Include="ModelContextProtocol.AspNetCore" Version="2.2.0" />
   </ItemGroup>
+  <ItemGroup>
+    <Content Update="wwwroot/inspection.css" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
 </Project>

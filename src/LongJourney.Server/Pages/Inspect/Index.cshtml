@@ -1,0 +1,72 @@
+@page "/inspect"
+@model LongJourney.Server.Pages.Inspect.IndexModel
+@{
+    ViewData["Title"] = "기억 둘러보기";
+}
+@if (Model.Data is { } data)
+{
+    <div class="page-heading"><div><p class="eyebrow">INSPECTION / MEMORY</p><h1>기억 둘러보기</h1></div><a class="button secondary" asp-page="/Inspect/Index">최신 상태 보기</a></div>
+    <section class="stats" aria-label="전체 corpus 통계">
+        <div><span>기억</span><strong>@data.Statistics.Memories</strong></div>
+        <div><span>Source</span><strong>@data.Statistics.Sources</strong></div>
+        <div><span>단방향 관계</span><strong>@data.Statistics.Relations</strong></div>
+    </section>
+    <section class="depth-strip" aria-label="Depth별 기억 수">
+        @if (data.Statistics.Depths.Count == 0)
+        {
+            <span>아직 저장된 기억이 없습니다.</span>
+        }
+        @foreach (var depth in data.Statistics.Depths)
+        {
+            <a asp-page="/Inspect/Index" asp-route-depth="@depth.Depth">Depth @depth.Depth <strong>@depth.Count</strong></a>
+        }
+    </section>
+    <div class="columns">
+    <section>
+        <h2>기억 목록</h2>
+        <form method="get" class="filters">
+            <div class="search-field"><label for="q">내용 또는 ID 찾기</label><input id="q" name="q" value="@Model.Query" maxlength="200" placeholder="검색어를 입력하세요" /></div>
+            <div><label for="depth">Depth</label><input id="depth" name="depth" type="number" min="0" value="@Model.Depth" placeholder="전체" /></div>
+            @if (Model.Revision is not null)
+            {
+                <input type="hidden" name="revision" value="@Model.Revision" />
+            }
+            <button type="submit">찾기</button>
+        </form>
+        <p class="hint">대소문자를 구분하여 입력 문자열이 그대로 포함된 내용 또는 ID를 찾습니다. 의미 검색을 사용하지 않습니다.</p>
+        @if (Model.Revision is { } revision)
+        {
+            <p class="notice">생성 revision @revision 의 출력 기억입니다. <a asp-page="/Inspect/Run" asp-route-id="@revision">원래 실행 보기</a> · <a asp-page="/Inspect/Index">필터 해제</a></p>
+        }
+        <p class="section-meta">@data.Memories.Total 개 · 최신 생성 순 · 본문 앞 240자</p>
+        <partial name="_MemoryRows" model="data.Memories.Items" />
+        <nav class="pager" aria-label="기억 페이지">
+            @if (data.Memories.HasPrevious)
+            {
+                <a asp-page="/Inspect/Index" asp-route-p="@(data.Memories.Page - 1)" asp-route-depth="@Model.Depth" asp-route-q="@Model.Query" asp-route-revision="@Model.Revision" asp-route-snapshot="@data.Memories.Snapshot">← 이전</a>
+            }
+            <span>@data.Memories.Page / @data.Memories.Pages 페이지</span>
+            @if (data.Memories.HasNext)
+            {
+                <a asp-page="/Inspect/Index" asp-route-p="@(data.Memories.Page + 1)" asp-route-depth="@Model.Depth" asp-route-q="@Model.Query" asp-route-revision="@Model.Revision" asp-route-snapshot="@data.Memories.Snapshot">다음 →</a>
+            }
+        </nav>
+    </section>
+    <aside>
+        <h2>최근 관계</h2>
+        <p class="hint">관계 생성 시각 순, 최대 12개. 저장된 소유자 → 대상 방향입니다.</p>
+        @if (data.RecentRelations.Count == 0)
+        {
+            <p class="empty">아직 저장된 관계가 없습니다.</p>
+        }
+        @foreach (var relation in data.RecentRelations)
+        {
+            <article class="relation-card">
+                <span class="badge @relation.Kind.ToString().ToLowerInvariant()">@relation.Kind.ToString().ToLowerInvariant()</span>
+                <p><a asp-page="/Inspect/Memory" asp-route-id="@relation.MemoryId">@relation.MemoryId</a><span class="arrow" aria-label="에서 대상으로"> → </span><a asp-page="/Inspect/Memory" asp-route-id="@relation.RelatedMemoryId">@relation.RelatedMemoryId</a></p>
+                <time>@InspectionPageModel.At(relation.RelatedAt)</time>
+            </article>
+        }
+    </aside>
+    </div>
+}

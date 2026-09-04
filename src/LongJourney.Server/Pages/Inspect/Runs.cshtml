@@ -1,0 +1,33 @@
+@page "/inspect/runs"
+@model LongJourney.Server.Pages.Inspect.RunsModel
+@{
+    ViewData["Title"] = "실행 기록";
+}
+@if (Model.Data is { } data)
+{
+    <div class="page-heading"><div><p class="eyebrow">DREAM & MEDITATION</p><h1>실행 기록</h1><p class="lead">저장된 처리 상태와 결과를 확인합니다.</p></div><a class="button secondary" asp-page="/Inspect/Runs">최신 상태 보기</a></div>
+    <p class="section-meta">@data.Total 개 · 시작 시각 최신 순</p>
+    @if (data.Items.Count == 0)
+    {
+        <p class="empty">아직 저장된 실행이 없습니다.</p>
+    }
+    @foreach (var item in data.Items)
+    {
+        <article class="panel run-card">
+            <div class="row-meta"><a asp-page="/Inspect/Run" asp-route-id="@item.Run.Id"><strong>@InspectionPageModel.Kind(item.Run.Kind) #@item.Run.Id</strong></a><span class="badge">@item.Run.Status</span></div>
+            <p>기간 [@InspectionPageModel.At(item.Run.PeriodStart), @InspectionPageModel.At(item.Run.PeriodEnd))</p>
+            <p class="hint">시작 @InspectionPageModel.At(item.Run.StartedAt) · 종료 기록 @InspectionPageModel.At(item.FinishedAt)</p>
+        </article>
+    }
+    <nav class="pager" aria-label="실행 페이지">
+        @if (data.HasPrevious)
+        {
+            <a asp-page="/Inspect/Runs" asp-route-p="@(data.Page - 1)" asp-route-snapshot="@data.Snapshot">← 이전</a>
+        }
+        <span>@data.Page / @data.Pages 페이지</span>
+        @if (data.HasNext)
+        {
+            <a asp-page="/Inspect/Runs" asp-route-p="@(data.Page + 1)" asp-route-snapshot="@data.Snapshot">다음 →</a>
+        }
+    </nav>
+}

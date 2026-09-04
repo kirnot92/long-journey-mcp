@@ -11,7 +11,7 @@ using Microsoft.Extensions.DependencyInjection;
 
 namespace LongJourney.Tests;
 
-public sealed class ServerTests
+public sealed partial class ServerTests
 {
     [Fact]
     public async Task HttpMcpExposesOnlyThreeToolsAndPersistsSharedMemoryWithSnakeCaseResults()
@@ -328,22 +328,26 @@ public sealed class ServerTests
         {
             get; private set;
         }
+        public int Calls { get; private set; }
         public string EmbeddingSpace => "test-http:3";
         public Task<CognitiveResult<IReadOnlyList<ObservationProposal>>> ExtractAsync(
             string raw, CallContext context, CancellationToken cancellationToken)
         {
+            Calls++;
             Extractions++;
             return Task.FromResult(new CognitiveResult<IReadOnlyList<ObservationProposal>>([new(raw)], "test-http"));
         }
         public Task<EmbeddingVector> EmbedAsync(
             string text, CallContext context, CancellationToken cancellationToken)
         {
+            Calls++;
             return Task.FromResult(new EmbeddingVector(EmbeddingSpace, [1f, 1f, 1f]));
         }
         public Task<CognitiveResult<IReadOnlyList<string>>> SelectAsync(
             string query, string? context, IReadOnlyList<MemoryRecord> candidates,
             CallContext call, CancellationToken cancellationToken)
         {
+            Calls++;
             var memoryIds = MemoryTestData.Ids(candidates);
             var result = new CognitiveResult<IReadOnlyList<string>>(memoryIds, "test-http");
             return Task.FromResult(result);
@@ -352,6 +356,7 @@ public sealed class ServerTests
             MemoryRecord observation, IReadOnlyList<MemoryRecord> candidates,
             CallContext context, CancellationToken cancellationToken)
         {
+            Calls++;
             throw new InvalidOperationException("Scheduler is disabled for HTTP tests.");
         }
 
@@ -359,6 +364,7 @@ public sealed class ServerTests
             IReadOnlyList<MemoryRecord> neighborhood, IReadOnlyList<SourceArtifact> sources,
             CognitionRole role, CallContext context, CancellationToken cancellationToken)
         {
+            Calls++;
             throw new InvalidOperationException("Scheduler is disabled for HTTP tests.");
         }
     }

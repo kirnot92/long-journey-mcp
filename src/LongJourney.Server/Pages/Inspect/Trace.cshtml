@@ -1,0 +1,41 @@
+@page "/inspect/trace/{id}"
+@model LongJourney.Server.Pages.Inspect.TraceModel
+@{
+    ViewData["Title"] = "Provenance 추적";
+}
+@if (Model.Data is { } trace)
+{
+    <a class="back" asp-page="/Inspect/Memory" asp-route-id="@trace.MemoryId">← 선택 기억</a>
+    <div class="page-heading"><div><p class="eyebrow">PROVENANCE / TRACE</p><h1>기억이 만들어진 경로</h1><p class="lead">각 기억의 직접 부모 연결을 따라 최종 Source까지 읽습니다.</p></div></div>
+    @if (trace.Truncated)
+    {
+        <p class="notice" role="status">표시 상한 @InspectionTrace.NodeLimit 개에 도달하여 일부 조상만 보여줍니다. 화면 밖 부모의 ‘계속 추적’ 링크에서 나머지 경로를 확인하세요.</p>
+    }
+    <p class="hint">공유 부모는 한 번 표시하며, 해당 부모로 향하는 모든 연결은 각 기억 아래에 유지합니다. @(trace.Memories.Count)개 표시.</p>
+    @foreach (var memory in trace.Memories)
+    {
+        <article class="trace-node panel" id="@memory.Id">
+            <div class="row-meta"><span class="badge">Depth @memory.Depth</span><a asp-page="/Inspect/Memory" asp-route-id="@memory.Id">기억 상세</a></div>
+            <h2 class="id">@memory.Id</h2><p class="content-text">@memory.Content</p>
+            <ul class="link-list">
+            @foreach (var parent in memory.DerivedFrom)
+            {
+                <li>부모 →
+                @if (Model.VisibleIds.Contains(parent))
+                {
+                    <a href="#@parent">@parent</a>
+                }
+                else
+                {
+                    <a asp-page="/Inspect/Trace" asp-route-id="@parent">@parent · 계속 추적</a>
+                }
+                </li>
+            }
+            @if (memory.SourceRef is not null)
+            {
+                <li>Source → <a asp-page="/Inspect/Source" asp-route-id="@memory.SourceRef">@memory.SourceRef · 원문 보기</a></li>
+            }
+            </ul>
+        </article>
+    }
+}

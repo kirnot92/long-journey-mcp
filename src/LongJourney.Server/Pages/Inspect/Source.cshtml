@@ -1,0 +1,38 @@
+@page "/inspect/source/{id}"
+@model LongJourney.Server.Pages.Inspect.SourceModel
+@{
+    ViewData["Title"] = "Source 원문";
+}
+@if (Model.Data is { } data)
+{
+    <a class="back" asp-page="/Inspect/Index">← 기억 목록</a>
+    <div class="page-heading"><div><p class="eyebrow">SOURCE / ORIGINAL TEXT</p><h1>저장된 원문</h1><p class="lead">공백과 개행을 유지한 일반 텍스트입니다.</p></div></div>
+    <dl class="metadata">
+        <dt>Source ID</dt><dd class="id">@data.Source.Id</dd>
+        <dt>생성 시각</dt><dd>@InspectionPageModel.At(data.Source.CreatedAt)</dd>
+        <dt>저장 상태</dt><dd>@data.Source.Status</dd>
+        <dt>내용 SHA-256</dt><dd class="id">@data.Source.ContentHash</dd>
+    </dl>
+    @if (data.ReadError is not null)
+    {
+        <p class="notice error" role="alert">@data.ReadError</p>
+    }
+    else
+    {
+        <pre class="raw panel"><code>@data.Raw</code></pre>
+    }
+    <h2>이 Source의 observation</h2>
+    <p class="section-meta">@data.Observations.Total 개</p>
+    <partial name="_MemoryRows" model="data.Observations.Items" />
+    <nav class="pager" aria-label="Observation 페이지">
+        @if (data.Observations.HasPrevious)
+        {
+            <a asp-page="/Inspect/Source" asp-route-id="@data.Source.Id" asp-route-p="@(data.Observations.Page - 1)" asp-route-snapshot="@data.Observations.Snapshot">← 이전</a>
+        }
+        <span>@data.Observations.Page / @data.Observations.Pages 페이지</span>
+        @if (data.Observations.HasNext)
+        {
+            <a asp-page="/Inspect/Source" asp-route-id="@data.Source.Id" asp-route-p="@(data.Observations.Page + 1)" asp-route-snapshot="@data.Observations.Snapshot">다음 →</a>
+        }
+    </nav>
+}

@@ -129,6 +129,13 @@ internal static class SqliteSchema
             completed_at TEXT
         );
 
+        CREATE INDEX IF NOT EXISTS memories_created ON memories (created_at DESC, seq DESC);
+        CREATE INDEX IF NOT EXISTS memories_depth_created ON memories (depth, created_at DESC, seq DESC);
+        CREATE INDEX IF NOT EXISTS memories_source ON memories (source_ref, created_at DESC, seq DESC);
+        CREATE INDEX IF NOT EXISTS memories_revision ON memories (dream_revision, created_at DESC, seq DESC);
+        CREATE INDEX IF NOT EXISTS relations_recent ON relations (related_at DESC, seq DESC);
+        CREATE INDEX IF NOT EXISTS api_calls_run ON api_calls (run_id);
+
         CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5 (
             id,
             content,

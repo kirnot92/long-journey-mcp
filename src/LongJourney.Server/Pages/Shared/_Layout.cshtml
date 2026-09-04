@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>@ViewData["Title"] · Long Journey</title>
+    <link rel="stylesheet" href="~/inspection.css" />
+</head>
+<body>
+    <a class="skip" href="#main">본문으로 이동</a>
+    <header class="site-header">
+        <a class="brand" asp-page="/Inspect/Index"><span class="brand-mark" aria-hidden="true">LJ</span><span>Long Journey</span></a>
+        <nav aria-label="주 메뉴">
+            <a asp-page="/Inspect/Index">기억</a>
+            <a asp-page="/Inspect/Runs">실행 기록</a>
+            <span class="read-only">읽기 전용</span>
+        </nav>
+    </header>
+    <main id="main" class="shell">
+        @if (Model is InspectionPageModel inspection && inspection.Error is not null)
+        {
+            <section class="notice error" role="alert"><h1>조회할 수 없습니다</h1><p>@inspection.Error</p><a asp-page="/Inspect/Index">기억 목록으로 돌아가기</a></section>
+        }
+        @RenderBody()
+    </main>
+    <footer class="shell">조회는 API를 호출하거나 기억·recall·작업 상태를 바꾸지 않습니다. 시각은 UTC로 표시합니다.</footer>
+</body>
+</html>

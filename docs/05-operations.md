@@ -1,4 +1,4 @@
-# Phase 1~3 운영 안내
+# Phase 1~4 운영 안내
 
 ## 서버와 데이터
 
@@ -9,6 +9,18 @@
 `Engine:DataDirectory`에는 `memory.db`, immutable `sources/*.md`, `.server.lock`이 저장된다. 상대 경로는 서버 content root를 기준으로 해석하므로 실제 운영에서는 절대 경로를 권장한다. SQLite를 열거나 복구하기 전에 OS 파일 잠금을 얻으며 같은 corpus의 두 번째 서버 실행은 실패한다. 잠금 파일 자체는 종료 후 남을 수 있고 프로세스 종료 시 OS 잠금은 해제된다.
 
 Host는 `localhost`, `127.0.0.1`, `[::1]`만 허용하고, Origin 헤더가 있으면 요청 서버와 scheme·host·port가 일치해야 한다. 원격 공개·인증 서버 운영은 구현하지 않았다. CLI `--urls`나 `ASPNETCORE_URLS`로 외부 인터페이스를 여는 방식은 지원하지 않으며, 사용자 지정 `Kestrel:Endpoints`가 있으면 시작을 거부한다.
+
+## 읽기 전용 Inspection
+
+브라우저에서 `http://127.0.0.1:5088/inspect`에 접속한다. 기존 `Server:Port`를 공유하며 API key 없이도 저장된 정보를 확인할 수 있다. 기억·Source 원문·provenance·depth 통계·최근 outgoing 관계와 Dream/Meditation 실행·제안·거절 사유·비용을 제공한다. 모든 시각은 UTC로 표시한다.
+
+목록은 25개씩 표시하며 기억은 최신 생성 순이다. 내용/ID 검색은 대소문자를 구분하는 리터럴 부분 문자열 검색으로, 유료 API나 embedding/recall을 호출하지 않는다. 페이지 이동에는 최초 생성 sequence 상한을 유지하고 새 검색에서 갱신한다. Trace는 조상 최대 200개와 모든 직접 부모 링크를 표시하며 잘린 경로는 ‘계속 추적’으로 읽는다.
+
+실행의 정산된 실제액과 미정산 예약액을 구분한다. 예산 차감 합계는 실제액 + 미정산 예약액이며, 정산 완료 호출의 과거 예약액을 중복 합산하지 않는다. 이월 work의 원래 실행은 제안·출력을 소유하고 호출 당시 실행은 비용을 부담한다. 기록되지 않은 work별 비용이나 이월 완료 시각은 추정하지 않는다.
+
+화면 조회는 기억·recall·관계·Source 복구·작업·usage 상태를 바꾸지 않는다. 원문·기억·제안은 HTML 인코딩된 일반 텍스트로 표시하고 임의의 파일 경로를 입력받지 않는다. 페이지와 로컬 CSS에도 Host/Origin 검사를 적용한다. Source를 읽을 수 없어도 metadata와 observation을 확인할 수 있다.
+
+기존 서버 시작 복구와 백그라운드 동작은 유지된다. 백그라운드 없이 관찰하려면 `--no-scheduler`로 시작한다. 상세 동작과 조회 제한은 [Inspection 안내](09-inspection.md)를 참고한다.
 
 ## 설정
 

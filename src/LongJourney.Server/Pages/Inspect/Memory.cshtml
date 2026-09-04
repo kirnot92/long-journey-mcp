@@ -1,0 +1,57 @@
+@page "/inspect/memory/{id}"
+@model LongJourney.Server.Pages.Inspect.MemoryModel
+@{
+    ViewData["Title"] = "기억 상세";
+}
+@if (Model.Data is { } memory)
+{
+    <a class="back" asp-page="/Inspect/Index">← 기억 목록</a>
+    <div class="page-heading"><div><p class="eyebrow">MEMORY / DEPTH @memory.Depth</p><h1>기억 상세</h1></div><a class="button" asp-page="/Inspect/Trace" asp-route-id="@memory.Id">Provenance 추적</a></div>
+    <section class="panel"><p class="content-text">@memory.Content</p></section>
+    <dl class="metadata">
+        <dt>ID</dt><dd class="id">@memory.Id</dd>
+        <dt>Depth</dt><dd>@memory.Depth</dd>
+        <dt>생성 시각</dt><dd>@InspectionPageModel.At(memory.CreatedAt)</dd>
+        <dt>최근 recall</dt><dd>@InspectionPageModel.At(memory.LastRecalledAt)</dd>
+        <dt>생성 모델</dt><dd>@memory.CreatedByModel</dd>
+        <dt>생성 revision</dt><dd>
+        @if (memory.DreamRevision > 0)
+        {
+            <a asp-page="/Inspect/Run" asp-route-id="@memory.DreamRevision">@memory.DreamRevision</a>
+        }
+        else
+        {
+            <span>0 · Remember observation</span>
+        }
+        </dd>
+        <dt>서로 다른 Source root</dt><dd>@memory.UniqueSourceRootCount</dd>
+        @if (memory.SourceRef is not null)
+        {
+            <dt>Source</dt><dd><a asp-page="/Inspect/Source" asp-route-id="@memory.SourceRef">@memory.SourceRef</a></dd>
+        }
+    </dl>
+    <section><h2>직접 부모 · derived_from</h2>
+        @if (memory.DerivedFrom.Count == 0)
+        {
+            <p class="empty">직접 observation에는 부모 기억이 없습니다. 위 Source에서 원문을 확인할 수 있습니다.</p>
+        }
+        <ul class="link-list">
+        @foreach (var parent in memory.DerivedFrom)
+        {
+            <li><a asp-page="/Inspect/Memory" asp-route-id="@parent">@parent</a></li>
+        }
+        </ul>
+    </section>
+    <section><h2>Outgoing 관계</h2><p class="hint">이 기억이 소유한 저장된 방향만 표시합니다.</p>
+        @if (memory.Relations.Count == 0)
+        {
+            <p class="empty">저장된 outgoing 관계가 없습니다.</p>
+        }
+        <ul class="link-list">
+        @foreach (var relation in memory.Relations)
+        {
+            <li><span class="badge @relation.Kind.ToString().ToLowerInvariant()">@relation.Kind.ToString().ToLowerInvariant()</span> → <a asp-page="/Inspect/Memory" asp-route-id="@relation.RelatedMemoryId">@relation.RelatedMemoryId</a><time>@InspectionPageModel.At(relation.RelatedAt)</time></li>
+        }
+        </ul>
+    </section>
+}

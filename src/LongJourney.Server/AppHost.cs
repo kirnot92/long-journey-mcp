@@ -29,7 +29,8 @@ public static class AppHost
         var builder = WebApplication.CreateBuilder(new WebApplicationOptions
         {
             Args = hostArguments.ToArray(),
-            ApplicationName = typeof(AppHost).Assembly.GetName().Name
+            ApplicationName = typeof(AppHost).Assembly.GetName().Name,
+            WebRootPath = Path.Combine(AppContext.BaseDirectory, "wwwroot")
         });
         configure?.Invoke(builder);
 
@@ -38,6 +39,8 @@ public static class AppHost
         ConfigureLocalListener(builder);
         ConfigureOperationalLogging(builder);
         RegisterMemoryServices(builder.Services, engineOptions, openAiOptions);
+
+        builder.Services.AddRazorPages();
 
         builder.Services.AddMcpServer()
             .WithHttpTransport(options => options.SessionMode = HttpServerSessionMode.Stateless)
@@ -48,7 +51,7 @@ public static class AppHost
         {
             // Resolve now so corpus ownership and source archive recovery complete before serving requests.
             _ = app.Services.GetRequiredService<MemoryEngine>();
-            MapMemoryEndpoint(app);
+            ConfigureRequestPipeline(app);
             return app;
         }
         catch
@@ -121,6 +124,7 @@ public static class AppHost
             _ = provider.GetRequiredService<CorpusLease>();
             return new SqliteMemoryStore(engineOptions);
         });
+        services.AddSingleton<IInspectionReader>(provider => (IInspectionReader)provider.GetRequiredService<IMemoryStore>());
         services.AddSingleton<IUsageLedger>(provider => provider.GetRequiredService<IMemoryStore>());
         services.AddSingleton(_ => new HttpClient { Timeout = Timeout.InfiniteTimeSpan });
         services.TryAddSingleton<ICognition, OpenAiCognition>();
@@ -132,7 +136,7 @@ public static class AppHost
         services.AddHostedService<SchedulerWorker>();
     }
 
-    private static void MapMemoryEndpoint(WebApplication app)
+    private static void ConfigureRequestPipeline(WebApplication app)
     {
         app.Use(async (context, next) =>
         {
@@ -144,6 +148,29 @@ public static class AppHost
 
             await next(context);
         });
+        app.Use(async (context, next) =>
+        {
+            if (!context.Request.Path.StartsWithSegments("/inspect"))
+            {
+                await next(context);
+                return;
+            }
+
+            context.Response.Headers.CacheControl = "no-store";
+            try
+            {
+                await next(context);
+            }
+            catch (Exception exception) when (!context.Response.HasStarted && exception is not OperationCanceledException)
+            {
+                app.Logger.LogWarning("Inspection read failed ({ErrorType}).", exception.GetType().Name);
+                context.Response.StatusCode = StatusCodes.Status500InternalServerError;
+                context.Response.ContentType = "text/plain; charset=utf-8";
+                await context.Response.WriteAsync("저장된 정보를 읽을 수 없습니다. 잠시 후 다시 확인해 주세요.");
+            }
+        });
+        app.UseStaticFiles();
+        app.MapRazorPages();
         app.MapMcp("/mcp");
     }
 

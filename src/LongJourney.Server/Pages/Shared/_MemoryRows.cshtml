@@ -1,0 +1,18 @@
+@model IReadOnlyList<InspectionMemory>
+@if (Model.Count == 0)
+{
+    <p class="empty">표시할 기억이 없습니다. 검색 조건을 바꾸거나 새로 저장된 기억을 확인해 주세요.</p>
+}
+else
+{
+    <div class="memory-list">
+    @foreach (var memory in Model)
+    {
+        <article class="memory-card">
+            <div class="row-meta"><span class="badge">Depth @memory.Depth</span><time>@InspectionPageModel.At(memory.CreatedAt)</time></div>
+            <a class="memory-content" asp-page="/Inspect/Memory" asp-route-id="@memory.Id">@memory.Content</a>
+            <div class="id">@memory.Id</div>
+        </article>
+    }
+    </div>
+}

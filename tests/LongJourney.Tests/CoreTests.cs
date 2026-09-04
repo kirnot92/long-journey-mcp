@@ -19,7 +19,9 @@ public sealed class CoreTests
         Assert.True(duplicate.Duplicate);
         Assert.Equal(first.Memories[0].Id, duplicate.Memories[0].Id);
         var restarted = new SqliteMemoryStore(fixture.Options);
-        var engine = new MemoryEngine(restarted, fixture.Cognition, new MemorySearch(restarted, fixture.Cognition, fixture.Options), fixture.Options, fixture.Clock);
+        var restartedSearch = new MemorySearch(restarted, fixture.Cognition, fixture.Options);
+        var engine = new MemoryEngine(
+            restarted, fixture.Cognition, restartedSearch, fixture.Options, fixture.Clock);
         Assert.True((await engine.RememberAsync(raw)).Duplicate);
         Assert.Equal(1, fixture.Cognition.ExtractCalls);
         Assert.Single(restarted.ReadSnapshot().Memories);
@@ -32,7 +34,11 @@ public sealed class CoreTests
         using var fixture = new Fixture();
         var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        fixture.Cognition.BeforeExtract = async () => { entered.SetResult(); await release.Task; };
+        fixture.Cognition.BeforeExtract = async () =>
+        {
+            entered.SetResult();
+            await release.Task;
+        };
         var first = fixture.Engine.RememberAsync("one concurrent observation");
         await entered.Task;
         var second = await fixture.Engine.RememberAsync("one concurrent observation");
@@ -107,7 +113,7 @@ public sealed class CoreTests
         Assert.Equal(3, result.Memories.Count);
         Assert.All(result.Memories, m => Assert.Equal(1, m.UniqueSourceRootCount));
         var run = fixture.Run(1);
-        var ids = result.Memories.Select(m => m.Id).ToArray();
+        var ids = MemoryTestData.Ids(result.Memories);
         var error = Assert.Throws<InvariantException>(() => fixture.Add(run, "a", ids));
         Assert.Contains("Source roots", error.Message, StringComparison.Ordinal);
     }
@@ -118,9 +124,15 @@ public sealed class CoreTests
         using var fixture = new Fixture();
         var roots = await fixture.Roots(9);
         var run = fixture.Run(1);
-        var firstGeneration = roots.Chunk(3).Select((group, i) => fixture.Add(run, "group" + i, group.Select(m => m.Id).ToArray())).ToArray();
+        var firstGeneration = new MemoryRecord[3];
+        for (var groupIndex = 0; groupIndex < firstGeneration.Length; groupIndex++)
+        {
+            var firstRoot = groupIndex * 3;
+            var rootGroup = roots[firstRoot..(firstRoot + 3)];
+            firstGeneration[groupIndex] = fixture.Add(run, "group" + groupIndex, MemoryTestData.Ids(rootGroup));
+        }
         Assert.All(firstGeneration, m => Assert.Equal(3, m.UniqueSourceRootCount));
-        var parentIds = firstGeneration.Select(m => m.Id).ToArray();
+        var parentIds = MemoryTestData.Ids(firstGeneration);
         Assert.Throws<InvariantException>(() => fixture.Add(run, "too soon", parentIds));
         var nextRun = fixture.Run(2);
         var secondGeneration = fixture.Add(nextRun, "next", parentIds);
@@ -139,10 +151,17 @@ public sealed class CoreTests
     public async Task OverlappingParentsCannotManufactureRootSupport()
     {
         using var fixture = new Fixture();
-        var ids = (await fixture.Roots(3)).Select(m => m.Id).ToArray();
+        var roots = await fixture.Roots(3);
+        var ids = MemoryTestData.Ids(roots);
         var run = fixture.Run(1);
-        var parents = Enumerable.Range(0, 3).Select(i => fixture.Add(run, "overlap" + i, ids)).ToArray();
-        Assert.Throws<InvariantException>(() => fixture.Add(fixture.Run(2), "fake depth", parents.Select(m => m.Id).ToArray()));
+        var parents = new MemoryRecord[3];
+        for (var index = 0; index < parents.Length; index++)
+        {
+            parents[index] = fixture.Add(run, "overlap" + index, ids);
+        }
+
+        var parentIds = MemoryTestData.Ids(parents);
+        Assert.Throws<InvariantException>(() => fixture.Add(fixture.Run(2), "fake depth", parentIds));
     }
 
     [Fact]
@@ -157,8 +176,34 @@ public sealed class CoreTests
         var snapshot = fixture.Store.ReadSnapshot(run);
         Assert.Equal(3, snapshot.Memories.Count);
         Assert.Empty(snapshot.RecallEvents);
-        Assert.All(snapshot.Memories, m => { Assert.Empty(m.Relations); Assert.Null(m.LastRecalledAt); });
+        Assert.All(snapshot.Memories, memory =>
+        {
+            Assert.Empty(memory.Relations);
+            Assert.Null(memory.LastRecalledAt);
+        });
         Assert.Throws<InvariantException>(() => fixture.Add(run, "new parent", [roots[0].Id, roots[1].Id, future.Id]));
+    }
+
+    [Fact]
+    public async Task FrozenSnapshotUsesLatestRecallTimeBeforeItsSequenceBoundary()
+    {
+        using var fixture = new Fixture();
+        var memory = Assert.Single(await fixture.Roots(1));
+        var latestFrozenRecall = Day.AddHours(3);
+        var earlierRecallRecordedLater = Day.AddHours(1);
+        var recallAfterRunStarted = Day.AddHours(5);
+
+        fixture.Store.RecordRecall([memory.Id], latestFrozenRecall);
+        fixture.Store.RecordRecall([memory.Id], earlierRecallRecordedLater);
+        var run = fixture.Run(1);
+        fixture.Store.RecordRecall([memory.Id], recallAfterRunStarted);
+
+        var frozenSnapshot = fixture.Store.ReadSnapshot(run);
+        var frozenMemory = Assert.Single(frozenSnapshot.Memories);
+
+        Assert.Equal(latestFrozenRecall, frozenMemory.LastRecalledAt);
+        Assert.Equal(2, frozenSnapshot.RecallEvents.Count);
+        Assert.Equal(recallAfterRunStarted, fixture.Store.GetMemory(memory.Id)!.LastRecalledAt);
     }
 
     [Fact]
@@ -181,7 +226,7 @@ public sealed class CoreTests
     {
         using var fixture = new Fixture();
         var roots = await fixture.Roots(4);
-        var memory = fixture.Add(fixture.Run(1), "immutable", roots.Take(3).Select(m => m.Id).ToArray());
+        var memory = fixture.Add(fixture.Run(1), "immutable", MemoryTestData.Ids(roots[..3]));
         using var db = new SqliteConnection($"Data Source={fixture.Store.DatabasePath};Foreign Keys=True;Pooling=False");
         db.Open();
         foreach (var sql in new[]
@@ -205,7 +250,8 @@ public sealed class CoreTests
     public async Task ReapplyingSavedProposalIsIdempotentButIndependentRunsMayRepeatIt()
     {
         using var fixture = new Fixture();
-        var ids = (await fixture.Roots(3)).Select(m => m.Id).ToArray();
+        var roots = await fixture.Roots(3);
+        var ids = MemoryTestData.Ids(roots);
         var run = fixture.Run(1);
         var first = fixture.Add(run, "same work", ids);
         Assert.Equal(first.Id, fixture.Add(run, "same work", ids).Id);
@@ -218,10 +264,18 @@ public sealed class CoreTests
         using var fixture = new Fixture();
         await fixture.Roots(5);
         var before = await fixture.Search.SearchAsync("experience", new CallContext(), default);
-        for (var i = 0; i < 3; i++) await fixture.Engine.RecallAsync("experience");
+        for (var recallIndex = 0; recallIndex < 3; recallIndex++)
+        {
+            await fixture.Engine.RecallAsync("experience");
+        }
         var after = await fixture.Search.SearchAsync("experience", new CallContext(), default);
-        Assert.Equal(before.Select(m => m.Id), after.Select(m => m.Id));
-        Assert.All(fixture.Store.ReadSnapshot().Memories, m => { Assert.Equal(0, m.Depth); Assert.Equal(1, m.UniqueSourceRootCount); Assert.Empty(m.Relations); });
+        Assert.Equal(MemoryTestData.Ids(before), MemoryTestData.Ids(after));
+        Assert.All(fixture.Store.ReadSnapshot().Memories, memory =>
+        {
+            Assert.Equal(0, memory.Depth);
+            Assert.Equal(1, memory.UniqueSourceRootCount);
+            Assert.Empty(memory.Relations);
+        });
         Assert.NotEmpty(fixture.Store.ReadSnapshot().RecallEvents);
     }
 
@@ -230,10 +284,71 @@ public sealed class CoreTests
     {
         using var fixture = new Fixture();
         await fixture.Roots(3);
-        fixture.Cognition.BadRecallId = true;
+        fixture.Cognition.SelectedMemoryIds = ["hallucinated"];
         await Assert.ThrowsAsync<InvariantException>(() => fixture.Engine.RecallAsync("experience"));
         Assert.Empty(fixture.Store.ReadSnapshot().RecallEvents);
         _ = fixture.Store.LexicalSearch("\" OR NEAR( [x] : *", 10);
+    }
+
+    [Fact]
+    public async Task RecallRejectsUnknownIdAfterResultLimitBeforeRecordingAnyRecall()
+    {
+        using var fixture = new Fixture();
+        var memory = Assert.Single(await fixture.Roots(1));
+        fixture.Options.RecallLimit = 1;
+        fixture.Cognition.SelectedMemoryIds = [memory.Id, "unknown-after-limit"];
+
+        await Assert.ThrowsAsync<InvariantException>(() => fixture.Engine.RecallAsync("experience"));
+
+        Assert.Empty(fixture.Store.ReadSnapshot().RecallEvents);
+        Assert.Null(fixture.Store.GetMemory(memory.Id)!.LastRecalledAt);
+    }
+
+    [Fact]
+    public async Task LexicalSearchDeduplicatesBeforeKeepingTheFirst64DistinctTokens()
+    {
+        using var fixture = new Fixture();
+        var included = await fixture.Engine.RememberAsync("includedtoken");
+        var excluded = await fixture.Engine.RememberAsync("excludedtoken");
+        var queryTokens = new List<string>();
+
+        // Repetitions must consume only one distinct-token slot.
+        for (var index = 0; index < 64; index++)
+        {
+            queryTokens.Add("repeatedtoken");
+        }
+
+        for (var index = 0; index < 62; index++)
+        {
+            queryTokens.Add("unmatchedtoken" + index);
+        }
+
+        queryTokens.Add("includedtoken"); // 64th distinct token.
+        queryTokens.Add("excludedtoken"); // 65th distinct token.
+        var query = string.Join(" ", queryTokens);
+
+        var foundIds = fixture.Store.LexicalSearch(query, limit: 10);
+
+        Assert.Equal(Assert.Single(included.Memories).Id, Assert.Single(foundIds));
+        Assert.DoesNotContain(Assert.Single(excluded.Memories).Id, foundIds);
+    }
+
+    [Theory]
+    [InlineData(float.NaN)]
+    [InlineData(float.PositiveInfinity)]
+    [InlineData(float.NegativeInfinity)]
+    public async Task EmbeddingRejectsNonfiniteValueAfterFinitePrefixWithoutReplacingStoredVector(float invalidValue)
+    {
+        using var fixture = new Fixture();
+        var memory = Assert.Single(await fixture.Roots(1));
+        var space = fixture.Cognition.EmbeddingSpace;
+        var originalEmbedding = fixture.Store.GetEmbedding(memory.Id, space)!;
+        var invalidEmbedding = new EmbeddingVector(space, [1f, invalidValue, 0.25f]);
+
+        Assert.Throws<InvariantException>(() => fixture.Store.SaveEmbedding(memory.Id, invalidEmbedding));
+
+        var storedEmbedding = fixture.Store.GetEmbedding(memory.Id, space)!;
+        Assert.Equal(originalEmbedding.Values, storedEmbedding.Values);
     }
 
     [Fact]
@@ -245,7 +360,7 @@ public sealed class CoreTests
         await fixture.Search.SearchAsync("experience", new CallContext(), default);
         Assert.Equal(2, fixture.Store.GetEmbeddings("new-test:3").Count);
         Assert.Equal(2, fixture.Store.GetEmbeddings("test:3").Count);
-        Assert.Equal(roots.Select(m => m.Id), fixture.Store.ReadSnapshot().Memories.Select(m => m.Id));
+        Assert.Equal(MemoryTestData.Ids(roots), MemoryTestData.Ids(fixture.Store.ReadSnapshot().Memories));
     }
 
     [Fact]
@@ -277,7 +392,9 @@ public sealed class CoreTests
         var options = new EngineOptions { DataDirectory = recoveredDirectory };
         var recovered = new SqliteMemoryStore(options);
         Assert.Equal(source.Source.Id, Assert.Single(recovered.GetIncompleteSources()).Id);
-        var engine = new MemoryEngine(recovered, fixture.Cognition, new MemorySearch(recovered, fixture.Cognition, options), options, fixture.Clock);
+        var recoveredSearch = new MemorySearch(recovered, fixture.Cognition, options);
+        var engine = new MemoryEngine(
+            recovered, fixture.Cognition, recoveredSearch, options, fixture.Clock);
         await engine.ResumePendingAsync();
         Assert.Single(recovered.GetSourceMemories(source.Source.Id));
     }
@@ -301,15 +418,41 @@ public sealed class CoreTests
         public async Task<MemoryRecord[]> Roots(int count)
         {
             var result = new List<MemoryRecord>();
-            for (var i = 0; i < count; i++) result.AddRange((await Engine.RememberAsync("experience " + i)).Memories);
+            for (var index = 0; index < count; index++)
+            {
+                var remembered = await Engine.RememberAsync("experience " + index);
+                result.AddRange(remembered.Memories);
+            }
             return result.ToArray();
         }
-        public RunRecord Run(int n) => Store.GetOrCreateRun(RunKind.Dream, Day.AddDays(n - 1), Day.AddDays(n), Day.AddDays(n), null);
-        public MemoryRecord Add(RunRecord run, string key, string[] parents) => Store.AddAbstraction(new AbstractionProposal("provisional " + key, parents), "test-model", run, key, 0, parents, new EmbeddingVector("test:3", [1, 1, 1]), Day.AddDays(run.Id));
-        public void Dispose() { if (System.IO.Directory.Exists(Directory)) System.IO.Directory.Delete(Directory, true); }
+        public RunRecord Run(int dayNumber)
+        {
+            var start = Day.AddDays(dayNumber - 1);
+            var end = Day.AddDays(dayNumber);
+            return Store.GetOrCreateRun(RunKind.Dream, start, end, end, null);
+        }
+
+        public MemoryRecord Add(RunRecord run, string key, string[] parents)
+        {
+            var proposal = new AbstractionProposal("provisional " + key, parents);
+            var embedding = new EmbeddingVector("test:3", [1, 1, 1]);
+            return Store.AddAbstraction(
+                proposal, "test-model", run, key, 0, parents, embedding, Day.AddDays(run.Id));
+        }
+
+        public void Dispose()
+        {
+            if (System.IO.Directory.Exists(Directory))
+            {
+                System.IO.Directory.Delete(Directory, recursive: true);
+            }
+        }
     }
 
-    private sealed class FixedClock(DateTimeOffset now) : TimeProvider { public override DateTimeOffset GetUtcNow() => now; }
+    private sealed class FixedClock(DateTimeOffset now) : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => now;
+    }
 
     private sealed class TestCognition : ICognition
     {
@@ -317,24 +460,77 @@ public sealed class CoreTests
         public int ExtractCalls;
         public int ObservationCount = 1;
         public bool FailEmbedding;
-        public bool BadRecallId;
+        public IReadOnlyList<string>? SelectedMemoryIds;
         public string? FailRaw;
         public Func<Task>? BeforeExtract;
-        public async Task<CognitiveResult<IReadOnlyList<ObservationProposal>>> ExtractAsync(string raw, CallContext context, CancellationToken cancellationToken)
+        public async Task<CognitiveResult<IReadOnlyList<ObservationProposal>>> ExtractAsync(
+            string raw, CallContext context, CancellationToken cancellationToken)
         {
             Interlocked.Increment(ref ExtractCalls);
-            if (raw == FailRaw) throw new InvalidDataException("Injected source refusal");
-            if (BeforeExtract is not null) await BeforeExtract();
-            return new(Enumerable.Range(0, ObservationCount).Select(i => new ObservationProposal(raw + " observation " + i)).ToArray(), "test-model");
+            if (raw == FailRaw)
+            {
+                throw new InvalidDataException("Injected source refusal");
+            }
+
+            if (BeforeExtract is not null)
+            {
+                await BeforeExtract();
+            }
+
+            var observations = new List<ObservationProposal>();
+            for (var index = 0; index < ObservationCount; index++)
+            {
+                observations.Add(new ObservationProposal(raw + " observation " + index));
+            }
+
+            return new CognitiveResult<IReadOnlyList<ObservationProposal>>(observations, "test-model");
         }
-        public Task<EmbeddingVector> EmbedAsync(string text, CallContext context, CancellationToken cancellationToken) => FailEmbedding
-            ? Task.FromException<EmbeddingVector>(new IOException("Injected embedding failure"))
-            : Task.FromResult(new EmbeddingVector(EmbeddingSpace, [1, text.Length % 5 + 1, 1]));
-        public Task<CognitiveResult<IReadOnlyList<string>>> SelectAsync(string query, string? context, IReadOnlyList<MemoryRecord> candidates, CallContext call, CancellationToken cancellationToken)
-            => Task.FromResult(new CognitiveResult<IReadOnlyList<string>>(BadRecallId ? ["hallucinated"] : candidates.Take(2).Select(m => m.Id).ToArray(), "test-model"));
-        public Task<CognitiveResult<IReadOnlyList<RelationProposal>>> AssimilateAsync(MemoryRecord observation, IReadOnlyList<MemoryRecord> candidates, CallContext context, CancellationToken cancellationToken)
-            => Task.FromResult(new CognitiveResult<IReadOnlyList<RelationProposal>>([], "test-model"));
-        public Task<CognitiveResult<IReadOnlyList<AbstractionProposal>>> AbstractAsync(IReadOnlyList<MemoryRecord> neighborhood, IReadOnlyList<SourceArtifact> sources, CognitionRole role, CallContext context, CancellationToken cancellationToken)
-            => Task.FromResult(new CognitiveResult<IReadOnlyList<AbstractionProposal>>([], "test-model"));
+        public Task<EmbeddingVector> EmbedAsync(
+            string text, CallContext context, CancellationToken cancellationToken)
+        {
+            if (FailEmbedding)
+            {
+                return Task.FromException<EmbeddingVector>(new IOException("Injected embedding failure"));
+            }
+
+            var embedding = new EmbeddingVector(EmbeddingSpace, [1, text.Length % 5 + 1, 1]);
+            return Task.FromResult(embedding);
+        }
+
+        public Task<CognitiveResult<IReadOnlyList<string>>> SelectAsync(
+            string query, string? context, IReadOnlyList<MemoryRecord> candidates,
+            CallContext call, CancellationToken cancellationToken)
+        {
+            if (SelectedMemoryIds is not null)
+            {
+                var configuredResult = new CognitiveResult<IReadOnlyList<string>>(SelectedMemoryIds, "test-model");
+                return Task.FromResult(configuredResult);
+            }
+
+            var selectedIds = new List<string>();
+            var count = Math.Min(2, candidates.Count);
+            for (var index = 0; index < count; index++)
+            {
+                selectedIds.Add(candidates[index].Id);
+            }
+
+            var result = new CognitiveResult<IReadOnlyList<string>>(selectedIds, "test-model");
+            return Task.FromResult(result);
+        }
+        public Task<CognitiveResult<IReadOnlyList<RelationProposal>>> AssimilateAsync(
+            MemoryRecord observation, IReadOnlyList<MemoryRecord> candidates,
+            CallContext context, CancellationToken cancellationToken)
+        {
+            var result = new CognitiveResult<IReadOnlyList<RelationProposal>>([], "test-model");
+            return Task.FromResult(result);
+        }
+
+        public Task<CognitiveResult<IReadOnlyList<AbstractionProposal>>> AbstractAsync(
+            IReadOnlyList<MemoryRecord> neighborhood, IReadOnlyList<SourceArtifact> sources,
+            CognitionRole role, CallContext context, CancellationToken cancellationToken)
+        {
+            var result = new CognitiveResult<IReadOnlyList<AbstractionProposal>>([], "test-model");
+            return Task.FromResult(result);
+        }
     }
 }

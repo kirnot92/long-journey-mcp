@@ -15,9 +15,19 @@ public sealed class SchedulerTests
         var scheduler = new MemoryScheduler(fixture.Store, fixture.Engine, fixture.Options, fixture.Clock);
 
         var results = await scheduler.TickAsync();
-        var runs = results.Select(x => fixture.Store.GetRuns().Single(r => r.Id == x.RunId)).ToArray();
+        var storedRuns = fixture.Store.GetRuns();
+        var runs = new RunRecord[results.Count];
+        for (var index = 0; index < results.Count; index++)
+        {
+            var result = results[index];
+            runs[index] = Assert.Single(storedRuns, run => run.Id == result.RunId);
+        }
+
         Assert.Equal(9, results.Count);
-        Assert.All(runs.Take(7), x => Assert.Equal(RunKind.Dream, x.Kind));
+        for (var index = 0; index < 7; index++)
+        {
+            Assert.Equal(RunKind.Dream, runs[index].Kind);
+        }
         Assert.Equal(RunKind.Meditation, runs[7].Kind);
         Assert.Equal(RunKind.Dream, runs[8].Kind);
         Assert.Equal(new DateTimeOffset(2026, 8, 23, 15, 0, 0, TimeSpan.Zero), runs[0].PeriodStart);
@@ -43,7 +53,7 @@ public sealed class SchedulerTests
 
         await Assert.ThrowsAsync<IOException>(() => scheduler.TickAsync());
         Assert.Equal("2026-09-01", fixture.Store.GetState("scheduler.next_dream_date"));
-        var interrupted = fixture.Store.GetRuns().Single();
+        var interrupted = Assert.Single(fixture.Store.GetRuns());
         Assert.Equal("running", interrupted.Status);
         fixture.Cognition.Assimilate = (_, _) => [];
         var results = await new MemoryScheduler(fixture.Store, fixture.Engine, fixture.Options, fixture.Clock).TickAsync();

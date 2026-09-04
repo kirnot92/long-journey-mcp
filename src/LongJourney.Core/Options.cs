@@ -13,17 +13,31 @@ public sealed class EngineOptions
     public int MeditationGraphLimit { get; set; } = 80;
     public int MeditationSourceLimit { get; set; } = 12;
     public string TimeZoneId { get; set; } = "Asia/Seoul";
-    public decimal? MeditationBudgetUsd { get; set; }
+    public decimal? MeditationBudgetUsd
+    {
+        get; set;
+    }
     public bool SchedulerEnabled { get; set; } = true;
     public int SchedulerPollSeconds { get; set; } = 60;
 
     public void Validate()
     {
-        if (string.IsNullOrWhiteSpace(DataDirectory) || RootBase < 2 || MaxRawCharacters < 1 || MaxObservations < 1 ||
-            MaxMemoryCharacters < 1 || SearchCandidates < 1 || RecallLimit < 1 || NeighborhoodSize < RootBase ||
-            MeditationGraphLimit < NeighborhoodSize || MeditationSourceLimit < 1 || SchedulerPollSeconds < 1 ||
+        if (string.IsNullOrWhiteSpace(DataDirectory) ||
+            RootBase < 2 ||
+            MaxRawCharacters < 1 ||
+            MaxObservations < 1 ||
+            MaxMemoryCharacters < 1 ||
+            SearchCandidates < 1 ||
+            RecallLimit < 1 ||
+            NeighborhoodSize < RootBase ||
+            MeditationGraphLimit < NeighborhoodSize ||
+            MeditationSourceLimit < 1 ||
+            SchedulerPollSeconds < 1 ||
             MeditationBudgetUsd is <= 0)
+        {
             throw new InputException("Invalid engine configuration. Bounds must be positive; RootBase must be at least 2.");
+        }
+
         _ = TimeZoneInfo.FindSystemTimeZoneById(TimeZoneId);
     }
 }
@@ -48,20 +62,38 @@ public sealed class OpenAiOptions
     public int TimeoutSeconds { get; set; } = 300;
     public ModelOptions Remember { get; set; } = new();
     public ModelOptions Recall { get; set; } = new() { ReasoningEffort = "medium" };
-    public ModelOptions Dream { get; set; } = new() { ReasoningEffort = "high", MaxOutputTokens = 8192 };
-    public ModelOptions Meditation { get; set; } = new()
+    public ModelOptions Dream
     {
-        Model = "gpt-5.6-sol", ReasoningEffort = "high", MaxOutputTokens = 16384,
-        InputUsdPerMillion = 4m, CachedInputUsdPerMillion = 0.4m, CacheWriteUsdPerMillion = 5m, OutputUsdPerMillion = 20m
+        get; set;
+    } = new()
+    {
+        ReasoningEffort = "high",
+        MaxOutputTokens = 8192
+    };
+    public ModelOptions Meditation
+    {
+        get; set;
+    } = new()
+    {
+        Model = "gpt-5.6-sol",
+        ReasoningEffort = "high",
+        MaxOutputTokens = 16384,
+        InputUsdPerMillion = 4m,
+        CachedInputUsdPerMillion = 0.4m,
+        CacheWriteUsdPerMillion = 5m,
+        OutputUsdPerMillion = 20m
     };
     public string EmbeddingModel { get; set; } = "text-embedding-3-large";
     public int EmbeddingDimensions { get; set; } = 3072;
     public decimal EmbeddingInputUsdPerMillion { get; set; } = 0.13m;
     public string EmbeddingSpace => $"{EmbeddingModel}:{EmbeddingDimensions}";
+
     public ModelOptions For(CognitionRole role) => role switch
     {
-        CognitionRole.Remember => Remember, CognitionRole.Recall => Recall,
-        CognitionRole.Dream => Dream, CognitionRole.Meditation => Meditation,
+        CognitionRole.Remember => Remember,
+        CognitionRole.Recall => Recall,
+        CognitionRole.Dream => Dream,
+        CognitionRole.Meditation => Meditation,
         _ => throw new ArgumentOutOfRangeException(nameof(role))
     };
 }

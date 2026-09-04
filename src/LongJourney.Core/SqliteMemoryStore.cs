@@ -1,7 +1,5 @@
 using System.Globalization;
 using System.Numerics;
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Microsoft.Data.Sqlite;
@@ -12,239 +10,241 @@ namespace LongJourney.Core;
 public sealed class SqliteMemoryStore : IMemoryStore
 {
     private readonly EngineOptions _options;
-    private readonly string _directory;
+    private readonly SourceArchive _sourceArchive;
     private readonly string _connectionString;
-    private readonly object _gate = new();
-    private static readonly UTF8Encoding Utf8 = new(false, true);
+    private readonly object _mutationGate = new();
     public string DatabasePath { get; }
 
     public SqliteMemoryStore(EngineOptions options)
     {
         options.Validate();
         _options = options;
-        _directory = Path.GetFullPath(options.DataDirectory);
-        Directory.CreateDirectory(_directory);
-        Directory.CreateDirectory(Path.Combine(_directory, "sources"));
-        DatabasePath = Path.Combine(_directory, "memory.db");
+        var corpusDirectory = Path.GetFullPath(options.DataDirectory);
+        _sourceArchive = new SourceArchive(corpusDirectory);
+        DatabasePath = Path.Combine(corpusDirectory, "memory.db");
         _connectionString = new SqliteConnectionStringBuilder
         {
-            DataSource = DatabasePath, ForeignKeys = true, DefaultTimeout = 30, Pooling = false
+            DataSource = DatabasePath,
+            ForeignKeys = true,
+            DefaultTimeout = 30,
+            Pooling = false
         }.ToString();
-        using var db = Open();
-        Exec(db, null, "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");
-        Exec(db, null, Schema);
-        var existingBase = Scalar(db, null, "SELECT value FROM state WHERE key='root_base'")?.ToString();
+        using var db = OpenConnection();
+        ExecuteNonQuery(db, null, "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;");
+        ExecuteNonQuery(db, null, SqliteSchema.Create);
+        var existingBase = ExecuteScalar(db, null, "SELECT value FROM state WHERE key='root_base'")?.ToString();
         if (existingBase is not null && existingBase != options.RootBase.ToString(CultureInfo.InvariantCulture))
+        {
             throw new InvariantException("RootBase differs from this corpus. It cannot be changed without validating existing memories.");
-        Exec(db, null, "INSERT OR IGNORE INTO state(key,value) VALUES('root_base',$base)", ("$base", options.RootBase));
+        }
+
+        ExecuteNonQuery(db, null, "INSERT OR IGNORE INTO state(key,value) VALUES('root_base',$base)", ("$base", options.RootBase));
         RecoverSourceFiles(db);
     }
 
-    private SqliteConnection Open()
+    private SqliteConnection OpenConnection()
     {
         var db = new SqliteConnection(_connectionString);
         db.Open();
         return db;
     }
 
-    private static SqliteCommand Command(SqliteConnection db, SqliteTransaction? tx, string sql, params (string, object?)[] parameters)
+    private static SqliteCommand CreateCommand(SqliteConnection db, SqliteTransaction? tx, string sql, params (string, object?)[] parameters)
     {
         var command = db.CreateCommand();
         command.Transaction = tx;
         command.CommandText = sql;
-        foreach (var (key, value) in parameters) command.Parameters.AddWithValue(key, value ?? DBNull.Value);
+        foreach (var (key, value) in parameters)
+        {
+            command.Parameters.AddWithValue(key, value ?? DBNull.Value);
+        }
+
         return command;
     }
 
-    private static int Exec(SqliteConnection db, SqliteTransaction? tx, string sql, params (string, object?)[] parameters)
+    private static int ExecuteNonQuery(SqliteConnection db, SqliteTransaction? tx, string sql, params (string, object?)[] parameters)
     {
-        using var command = Command(db, tx, sql, parameters);
+        using var command = CreateCommand(db, tx, sql, parameters);
         return command.ExecuteNonQuery();
     }
 
-    private static object? Scalar(SqliteConnection db, SqliteTransaction? tx, string sql, params (string, object?)[] parameters)
+    private static object? ExecuteScalar(SqliteConnection db, SqliteTransaction? tx, string sql, params (string, object?)[] parameters)
     {
-        using var command = Command(db, tx, sql, parameters);
+        using var command = CreateCommand(db, tx, sql, parameters);
         var result = command.ExecuteScalar();
         return result is DBNull ? null : result;
     }
 
-    private static string Stamp(DateTimeOffset value) => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
-    private static DateTimeOffset Time(string value) => DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
-    private static string Hash(string raw) => Convert.ToHexStringLower(SHA256.HashData(Utf8.GetBytes(raw)));
-    private static string Id(string prefix) => prefix + Guid.NewGuid().ToString("N");
+    private static string FormatTimestamp(DateTimeOffset value) => value.ToUniversalTime().ToString("O", CultureInfo.InvariantCulture);
+    private static DateTimeOffset ParseTimestamp(string value) => DateTimeOffset.Parse(value, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind);
+    private static string CreateId(string prefix) => prefix + Guid.NewGuid().ToString("N");
 
     public SourceArtifact SaveSource(string raw, DateTimeOffset now)
     {
-        if (raw.Length > _options.MaxRawCharacters) throw new InputException($"raw exceeds {_options.MaxRawCharacters} characters; submit one observation at a time.");
-        var hash = Hash(raw);
-        lock (_gate)
+        if (raw.Length > _options.MaxRawCharacters)
         {
-            using var db = Open();
-            using var tx = db.BeginTransaction();
-            var found = ReadSourceRow(db, tx, "content_hash=$value", hash);
-            if (found is not null)
-            {
-                var artifact = ReadArtifact(found);
-                if (!string.Equals(artifact.Raw, raw, StringComparison.Ordinal)) throw new InvariantException("Source hash collision or corrupt source archive.");
-                tx.Commit();
-                return artifact;
-            }
-
-            // File first: a crash before the DB commit leaves a recoverable immutable artifact.
-            var sourceId = "src_" + hash;
-            var relativePath = $"sources/{now.UtcDateTime:yyyy/MM/dd}/{sourceId}.md";
-            var source = new SourceRecord(sourceId, hash, relativePath, now.ToUniversalTime(), "pending");
-            var path = ResolveSourcePath(relativePath);
-            Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-            var header = $"---\nid: {source.Id}\ncreated_at: {Stamp(source.CreatedAt)}\ncontent_sha256: {hash}\n---\n\n";
-            var temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
-            try
-            {
-                using (var stream = new FileStream(temporaryPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
-                {
-                    stream.Write(Utf8.GetBytes(header + raw));
-                    stream.Flush(flushToDisk: true);
-                }
-                if (File.Exists(path))
-                {
-                    var parsed = ParseArtifact(path);
-                    if (parsed.Raw != raw) throw new InvariantException("Existing source artifact differs from its content hash.");
-                    source = parsed.Source;
-                }
-                else File.Move(temporaryPath, path);
-                InsertSource(db, tx, source);
-                tx.Commit();
-                return new SourceArtifact(source, raw);
-            }
-            finally
-            {
-                if (File.Exists(temporaryPath)) File.Delete(temporaryPath);
-            }
+            throw new InputException($"raw exceeds {_options.MaxRawCharacters} characters; submit one observation at a time.");
         }
-    }
 
-    private string ResolveSourcePath(string relative)
-    {
-        var fullPath = Path.GetFullPath(Path.Combine(_directory, relative));
-        if (!fullPath.StartsWith(_directory + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase))
-            throw new InvariantException("Source path is outside the corpus directory.");
-        return fullPath;
-    }
+        var contentHash = SourceArchive.ComputeContentHash(raw);
+        lock (_mutationGate)
+        {
+            using var db = OpenConnection();
+            using var tx = db.BeginTransaction();
+            var existingSource = ReadSourceRow(db, tx, "content_hash=$value", contentHash);
+            if (existingSource is not null)
+            {
+                var existingArtifact = _sourceArchive.Read(existingSource);
+                if (!string.Equals(existingArtifact.Raw, raw, StringComparison.Ordinal))
+                {
+                    throw new InvariantException("Source hash collision or corrupt source archive.");
+                }
 
-    private SourceArtifact ParseArtifact(string path)
-    {
-        var text = File.ReadAllText(path, Utf8);
-        var boundary = text.IndexOf("\n---\n\n", StringComparison.Ordinal);
-        if (!text.StartsWith("---\n", StringComparison.Ordinal) || boundary < 0)
-            throw new InvariantException($"Invalid source header: {Path.GetFileName(path)}");
-        var fields = text[4..boundary].Split('\n').Select(line => line.Split(": ", 2, StringSplitOptions.None))
-            .ToDictionary(pair => pair[0], pair => pair.Length == 2 ? pair[1] : "", StringComparer.Ordinal);
-        var raw = text[(boundary + 6)..];
-        var hash = Hash(raw);
-        if (!fields.TryGetValue("content_sha256", out var expected) || expected != hash || fields["id"] != "src_" + hash)
-            throw new InvariantException("Source archive integrity check failed.");
-        return new SourceArtifact(new SourceRecord(fields["id"], hash, Path.GetRelativePath(_directory, path).Replace('\\', '/'),
-            Time(fields["created_at"]), "pending"), raw);
-    }
+                tx.Commit();
+                return existingArtifact;
+            }
 
-    private SourceArtifact ReadArtifact(SourceRecord source)
-    {
-        var artifact = ParseArtifact(ResolveSourcePath(source.RelativePath));
-        if (artifact.Source.Id != source.Id || artifact.Source.ContentHash != source.ContentHash || artifact.Source.CreatedAt != source.CreatedAt)
-            throw new InvariantException("Source metadata does not match its immutable artifact.");
-        return new SourceArtifact(source, artifact.Raw);
+            // Persist the file first: a crash before commit leaves an artifact startup can recover.
+            using var archiveWrite = _sourceArchive.WriteImmutable(raw, contentHash, now);
+            InsertSource(db, tx, archiveWrite.Artifact.Source);
+            tx.Commit();
+            return archiveWrite.Artifact;
+        }
     }
 
     private void RecoverSourceFiles(SqliteConnection db)
     {
-        foreach (var path in Directory.EnumerateFiles(Path.Combine(_directory, "sources"), "src_*.md", SearchOption.AllDirectories))
+        foreach (var artifact in _sourceArchive.EnumerateArtifacts())
         {
-            var artifact = ParseArtifact(path);
             InsertSource(db, null, artifact.Source);
         }
-        // A single server owns a corpus. On startup it can resume work interrupted by its previous process.
-        Exec(db, null, "UPDATE sources SET status='pending' WHERE status='processing'");
+
+        // The host acquires CorpusLease before constructing this store.
+        // Only that owner may make interrupted extraction available for retry.
+        ExecuteNonQuery(db, null, "UPDATE sources SET status='pending' WHERE status='processing'");
     }
 
     private static void InsertSource(SqliteConnection db, SqliteTransaction? tx, SourceRecord source)
     {
-        Exec(db, tx, "INSERT OR IGNORE INTO sources(id,content_hash,relative_path,created_at,status) VALUES($id,$hash,$path,$at,'pending')",
-            ("$id", source.Id), ("$hash", source.ContentHash), ("$path", source.RelativePath), ("$at", Stamp(source.CreatedAt)));
-        Exec(db, tx, "INSERT INTO state(key,value) VALUES('corpus.first_source_at',$at) ON CONFLICT(key) DO UPDATE SET value=MIN(state.value,excluded.value)", ("$at", Stamp(source.CreatedAt)));
+        ExecuteNonQuery(db, tx, "INSERT OR IGNORE INTO sources(id,content_hash,relative_path,created_at,status) VALUES($id,$hash,$path,$at,'pending')",
+            ("$id", source.Id), ("$hash", source.ContentHash), ("$path", source.RelativePath), ("$at", FormatTimestamp(source.CreatedAt)));
+        ExecuteNonQuery(db, tx, "INSERT INTO state(key,value) VALUES('corpus.first_source_at',$at) ON CONFLICT(key) DO UPDATE SET value=MIN(state.value,excluded.value)", ("$at", FormatTimestamp(source.CreatedAt)));
     }
 
     private static SourceRecord? ReadSourceRow(SqliteConnection db, SqliteTransaction? tx, string condition, string value)
     {
-        using var command = Command(db, tx, $"SELECT id,content_hash,relative_path,created_at,status FROM sources WHERE {condition}", ("$value", value));
+        using var command = CreateCommand(db, tx, $"SELECT id,content_hash,relative_path,created_at,status FROM sources WHERE {condition}", ("$value", value));
         using var reader = command.ExecuteReader();
         return reader.Read() ? SourceFrom(reader) : null;
     }
 
-    private static SourceRecord SourceFrom(SqliteDataReader reader) => new(reader.GetString(0), reader.GetString(1), reader.GetString(2), Time(reader.GetString(3)), reader.GetString(4));
+    private static SourceRecord SourceFrom(SqliteDataReader reader)
+    {
+        var id = reader.GetString(0);
+        var contentHash = reader.GetString(1);
+        var relativePath = reader.GetString(2);
+        var createdAt = ParseTimestamp(reader.GetString(3));
+        var status = reader.GetString(4);
+        return new SourceRecord(id, contentHash, relativePath, createdAt, status);
+    }
 
     public SourceArtifact ReadSource(string sourceId)
     {
-        using var db = Open();
+        using var db = OpenConnection();
         var source = ReadSourceRow(db, null, "id=$value", sourceId) ?? throw new InputException("Source not found.");
-        return ReadArtifact(source);
+        return _sourceArchive.Read(source);
     }
 
     public RememberResult ReadRememberResult(string sourceId, bool duplicate)
     {
-        using var db = Open();
+        using var db = OpenConnection();
         using var tx = db.BeginTransaction(deferred: true);
-        var source = ReadSourceRow(db, tx, "id=$value", sourceId) ?? throw new InputException("Source not found.");
-        var memories = ReadMemories(db, tx, long.MaxValue, long.MaxValue).Where(m => m.SourceRef == sourceId).ToArray();
+        var source = ReadSourceRow(db, tx, "id=$value", sourceId)
+            ?? throw new InputException("Source not found.");
+        var allMemories = ReadMemories(db, tx, long.MaxValue, long.MaxValue);
+        var sourceMemories = SelectSourceMemories(allMemories, sourceId);
         tx.Commit();
-        return new RememberResult(sourceId, duplicate, memories, source.Status);
+
+        return new RememberResult(sourceId, duplicate, sourceMemories, source.Status);
+    }
+
+    private static MemoryRecord[] SelectSourceMemories(
+        IReadOnlyList<MemoryRecord> memories,
+        string sourceId)
+    {
+        var sourceMemories = new List<MemoryRecord>();
+        foreach (var memory in memories)
+        {
+            if (memory.SourceRef == sourceId)
+            {
+                sourceMemories.Add(memory);
+            }
+        }
+
+        return sourceMemories.ToArray();
     }
 
     public bool ClaimSource(string sourceId)
     {
-        using var db = Open();
-        return Exec(db, null, "UPDATE sources SET status='processing' WHERE id=$id AND status IN ('pending','failed')", ("$id", sourceId)) == 1;
+        using var db = OpenConnection();
+        return ExecuteNonQuery(db, null, "UPDATE sources SET status='processing' WHERE id=$id AND status IN ('pending','failed')", ("$id", sourceId)) == 1;
     }
 
     public void FailSource(string sourceId)
     {
-        using var db = Open();
-        Exec(db, null, "UPDATE sources SET status='failed' WHERE id=$id AND status='processing'", ("$id", sourceId));
+        using var db = OpenConnection();
+        ExecuteNonQuery(db, null, "UPDATE sources SET status='failed' WHERE id=$id AND status='processing'", ("$id", sourceId));
     }
 
     public IReadOnlyList<SourceRecord> GetIncompleteSources()
     {
-        using var db = Open();
-        using var command = Command(db, null, "SELECT id,content_hash,relative_path,created_at,status FROM sources WHERE status IN ('pending','failed') ORDER BY created_at,id");
+        using var db = OpenConnection();
+        using var command = CreateCommand(db, null, "SELECT id,content_hash,relative_path,created_at,status FROM sources WHERE status IN ('pending','failed') ORDER BY created_at,id");
         using var reader = command.ExecuteReader();
         var result = new List<SourceRecord>();
-        while (reader.Read()) result.Add(SourceFrom(reader));
+        while (reader.Read())
+        {
+            result.Add(SourceFrom(reader));
+        }
+
         return result;
     }
 
     public void CompleteSource(string sourceId, IReadOnlyList<NewObservation> observations, DateTimeOffset now)
     {
-        if (observations.Count > _options.MaxObservations) throw new InvariantException("Observation count exceeds configured limit.");
-        lock (_gate)
+        if (observations.Count > _options.MaxObservations)
         {
-            using var db = Open();
+            throw new InvariantException("Observation count exceeds configured limit.");
+        }
+
+        lock (_mutationGate)
+        {
+            using var db = OpenConnection();
             using var tx = db.BeginTransaction();
             var source = ReadSourceRow(db, tx, "id=$value", sourceId) ?? throw new InvariantException("Missing source.");
-            if (source.Status == "complete") return;
-            if (source.Status != "processing") throw new InvariantException("Source is not claimed for extraction.");
-            _ = ReadArtifact(source);
+            if (source.Status == "complete")
+            {
+                return;
+            }
+
+            if (source.Status != "processing")
+            {
+                throw new InvariantException("Source is not claimed for extraction.");
+            }
+
+            _ = _sourceArchive.Read(source);
             for (var index = 0; index < observations.Count; index++)
             {
                 var observation = observations[index];
                 CheckContent(observation.Content);
                 CheckEmbedding(observation.Embedding);
-                var id = Id("mem_");
+                var id = CreateId("mem_");
                 InsertMemory(db, tx, id, 0, observation.Content, sourceId, now, 0, observation.Model, $"source:{sourceId}:{index}");
-                Exec(db, tx, "INSERT INTO memory_roots(memory_id,source_id) VALUES($id,$src)", ("$id", id), ("$src", sourceId));
-                Exec(db, tx, "UPDATE memories SET sealed=1 WHERE id=$id", ("$id", id));
+                ExecuteNonQuery(db, tx, "INSERT INTO memory_roots(memory_id,source_id) VALUES($id,$src)", ("$id", id), ("$src", sourceId));
+                ExecuteNonQuery(db, tx, "UPDATE memories SET sealed=1 WHERE id=$id", ("$id", id));
                 SaveEmbedding(db, tx, id, observation.Embedding);
             }
-            Exec(db, tx, "UPDATE sources SET status='complete' WHERE id=$id", ("$id", sourceId));
+            ExecuteNonQuery(db, tx, "UPDATE sources SET status='complete' WHERE id=$id", ("$id", sourceId));
             tx.Commit();
         }
     }
@@ -252,119 +252,339 @@ public sealed class SqliteMemoryStore : IMemoryStore
     private void CheckContent(string content)
     {
         if (string.IsNullOrWhiteSpace(content) || content.Length > _options.MaxMemoryCharacters)
+        {
             throw new InvariantException("Memory content is empty or exceeds the configured character limit.");
+        }
     }
 
     private static void InsertMemory(SqliteConnection db, SqliteTransaction tx, string id, int depth, string content, string? source,
         DateTimeOffset now, long revision, string model, string originKey)
     {
-        if (string.IsNullOrWhiteSpace(model)) throw new InvariantException("Creation model must be recorded.");
-        Exec(db, tx, """
+        if (string.IsNullOrWhiteSpace(model))
+        {
+            throw new InvariantException("Creation model must be recorded.");
+        }
+
+        ExecuteNonQuery(db, tx, """
             INSERT INTO memories(id,depth,content,source_ref,created_at,dream_revision,created_by_model,origin_key)
             VALUES($id,$depth,$content,$source,$at,$revision,$model,$origin)
             """, ("$id", id), ("$depth", depth), ("$content", content), ("$source", source),
-            ("$at", Stamp(now)), ("$revision", revision), ("$model", model), ("$origin", originKey));
+            ("$at", FormatTimestamp(now)), ("$revision", revision), ("$model", model), ("$origin", originKey));
     }
 
+    // One read transaction keeps memory rows, outgoing edges, and recall history mutually consistent.
     public GraphSnapshot ReadSnapshot(RunRecord? run = null)
     {
-        using var db = Open();
+        using var db = OpenConnection();
         using var tx = db.BeginTransaction(deferred: true);
-        var memories = ReadMemories(db, tx, run?.MemoryHighWater ?? long.MaxValue, run?.RelationHighWater ?? long.MaxValue);
-        using var command = Command(db, tx, "SELECT memory_id,recalled_at,seq FROM recall_events WHERE seq <= $max ORDER BY seq", ("$max", run?.RecallHighWater ?? long.MaxValue));
-        using var reader = command.ExecuteReader();
-        var recalls = new List<RecallEvent>();
-        while (reader.Read()) recalls.Add(new RecallEvent(reader.GetString(0), Time(reader.GetString(1)), reader.GetInt64(2)));
-        reader.Close();
+        var memoryHighWater = run?.MemoryHighWater ?? long.MaxValue;
+        var relationHighWater = run?.RelationHighWater ?? long.MaxValue;
+        var recallHighWater = run?.RecallHighWater ?? long.MaxValue;
+
+        var memories = ReadMemories(db, tx, memoryHighWater, relationHighWater);
+        var recalls = ReadRecallEvents(db, tx, recallHighWater);
         if (run is not null)
         {
-            var recalled = recalls.GroupBy(x => x.MemoryId).ToDictionary(x => x.Key, x => x.Max(e => e.RecalledAt));
-            memories = memories.Select(m => m with { LastRecalledAt = recalled.TryGetValue(m.Id, out var at) ? at : null }).ToList();
+            RestoreRecallTimes(memories, recalls);
         }
+
         tx.Commit();
         return new GraphSnapshot(memories, recalls);
     }
 
-    private static List<MemoryRecord> ReadMemories(SqliteConnection db, SqliteTransaction? tx, long memoryMax, long relationMax)
+    private static List<RecallEvent> ReadRecallEvents(
+        SqliteConnection db,
+        SqliteTransaction tx,
+        long recallHighWater)
     {
-        var parents = new Dictionary<string, List<string>>(StringComparer.Ordinal);
-        using (var command = Command(db, tx, "SELECT child_id,parent_id FROM derived_from ORDER BY child_id,parent_id"))
-        using (var reader = command.ExecuteReader())
-            while (reader.Read())
+        using var command = CreateCommand(db, tx,
+            "SELECT memory_id,recalled_at,seq FROM recall_events WHERE seq <= $max ORDER BY seq",
+            ("$max", recallHighWater));
+        using var reader = command.ExecuteReader();
+        var recalls = new List<RecallEvent>();
+        while (reader.Read())
+        {
+            recalls.Add(new RecallEvent(
+                reader.GetString(0),
+                ParseTimestamp(reader.GetString(1)),
+                reader.GetInt64(2)));
+        }
+
+        return recalls;
+    }
+
+    private static void RestoreRecallTimes(
+        List<MemoryRecord> memories,
+        IReadOnlyList<RecallEvent> recalls)
+    {
+        // A frozen run must not see recalls recorded after its high-water mark.
+        var latestRecallByMemory = new Dictionary<string, DateTimeOffset>(StringComparer.Ordinal);
+        foreach (var recall in recalls)
+        {
+            if (!latestRecallByMemory.TryGetValue(recall.MemoryId, out var latestRecall) ||
+                recall.RecalledAt > latestRecall)
             {
-                if (!parents.TryGetValue(reader.GetString(0), out var values)) parents[reader.GetString(0)] = values = [];
-                values.Add(reader.GetString(1));
+                latestRecallByMemory[recall.MemoryId] = recall.RecalledAt;
             }
-        var relations = new Dictionary<string, List<MemoryRelation>>(StringComparer.Ordinal);
-        using (var command = Command(db, tx, "SELECT r.memory_id,r.related_memory_id,r.kind,r.related_at,r.seq FROM relations r JOIN memories m ON m.id=r.related_memory_id WHERE r.seq<=$max AND m.seq<=$mem ORDER BY r.seq", ("$max", relationMax), ("$mem", memoryMax)))
-        using (var reader = command.ExecuteReader())
-            while (reader.Read())
+        }
+
+        for (var index = 0; index < memories.Count; index++)
+        {
+            var memory = memories[index];
+            DateTimeOffset? lastRecalledAt = null;
+            if (latestRecallByMemory.TryGetValue(memory.Id, out var recalledAt))
             {
-                if (!relations.TryGetValue(reader.GetString(0), out var values)) relations[reader.GetString(0)] = values = [];
-                values.Add(new MemoryRelation(reader.GetString(1), Enum.Parse<RelationKind>(reader.GetString(2), true), Time(reader.GetString(3)), reader.GetInt64(4)));
+                lastRecalledAt = recalledAt;
             }
-        var result = new List<MemoryRecord>();
-        using (var command = Command(db, tx, """
+
+            memories[index] = memory with
+            {
+                LastRecalledAt = lastRecalledAt
+            };
+        }
+    }
+
+    private static List<MemoryRecord> ReadMemories(
+        SqliteConnection db,
+        SqliteTransaction? tx,
+        long memoryMax,
+        long relationMax)
+    {
+        var parentsByMemory = ReadParentIds(db, tx);
+        var relationsByMemory = ReadRelations(db, tx, memoryMax, relationMax);
+        using var command = CreateCommand(db, tx, """
             SELECT m.id,m.depth,m.content,m.source_ref,m.created_at,m.dream_revision,m.last_recalled_at,m.created_by_model,m.seq,
                 (SELECT COUNT(*) FROM memory_roots r WHERE r.memory_id=m.id)
             FROM memories m WHERE m.sealed=1 AND m.seq<=$max ORDER BY m.seq
-            """, ("$max", memoryMax)))
-        using (var reader = command.ExecuteReader())
-            while (reader.Read())
+            """, ("$max", memoryMax));
+        using var reader = command.ExecuteReader();
+        var memories = new List<MemoryRecord>();
+        while (reader.Read())
+        {
+            var id = reader.GetString(0);
+            var depth = reader.GetInt32(1);
+            var content = reader.GetString(2);
+            var sourceRef = reader.IsDBNull(3) ? null : reader.GetString(3);
+            var createdAt = ParseTimestamp(reader.GetString(4));
+            var dreamRevision = reader.GetInt64(5);
+            DateTimeOffset? lastRecalledAt = reader.IsDBNull(6) ? null : ParseTimestamp(reader.GetString(6));
+            var createdByModel = reader.GetString(7);
+            var sequence = reader.GetInt64(8);
+            var uniqueSourceRootCount = reader.GetInt32(9);
+
+            if (!parentsByMemory.TryGetValue(id, out var parentIds))
             {
-                var id = reader.GetString(0);
-                result.Add(new MemoryRecord(id, reader.GetInt32(1), reader.GetString(2), reader.IsDBNull(3) ? null : reader.GetString(3),
-                    parents.TryGetValue(id, out var p) ? p : [], relations.TryGetValue(id, out var r) ? r : [],
-                    Time(reader.GetString(4)), reader.GetInt64(5), reader.IsDBNull(6) ? null : Time(reader.GetString(6)),
-                    reader.GetString(7), reader.GetInt32(9), reader.GetInt64(8)));
+                parentIds = [];
             }
-        return result;
+
+            if (!relationsByMemory.TryGetValue(id, out var relations))
+            {
+                relations = [];
+            }
+
+            memories.Add(new MemoryRecord(
+                id,
+                depth,
+                content,
+                sourceRef,
+                parentIds,
+                relations,
+                createdAt,
+                dreamRevision,
+                lastRecalledAt,
+                createdByModel,
+                uniqueSourceRootCount,
+                sequence));
+        }
+
+        return memories;
     }
 
-    public MemoryRecord? GetMemory(string id) => ReadSnapshot().Memories.FirstOrDefault(m => m.Id == id);
-    public IReadOnlyList<MemoryRecord> GetSourceMemories(string sourceId) => ReadSnapshot().Memories.Where(m => m.SourceRef == sourceId).ToArray();
-
-    public IReadOnlyList<string> LexicalSearch(string query, int limit, int? depth = null, long? memoryHighWater = null)
+    private static Dictionary<string, List<string>> ReadParentIds(
+        SqliteConnection db,
+        SqliteTransaction? tx)
     {
-        if (limit < 1) return [];
-        // User queries are text, never executable FTS syntax.
-        var tokens = Regex.Matches(query, @"[\p{L}\p{N}_]+", RegexOptions.CultureInvariant)
-            .Cast<Match>().Select(m => m.Value).Distinct(StringComparer.Ordinal).Take(64).ToArray();
-        if (tokens.Length == 0) return [];
-        var match = string.Join(" OR ", tokens.Select(t => '"' + t.Replace("\"", "\"\"", StringComparison.Ordinal) + '"'));
-        using var db = Open();
-        using var command = Command(db, null, """
+        using var command = CreateCommand(db, tx,
+            "SELECT child_id,parent_id FROM derived_from ORDER BY child_id,parent_id");
+        using var reader = command.ExecuteReader();
+        var parentsByMemory = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        while (reader.Read())
+        {
+            var childId = reader.GetString(0);
+            var parentId = reader.GetString(1);
+            if (!parentsByMemory.TryGetValue(childId, out var parentIds))
+            {
+                parentIds = [];
+                parentsByMemory.Add(childId, parentIds);
+            }
+
+            parentIds.Add(parentId);
+        }
+
+        return parentsByMemory;
+    }
+
+    private static Dictionary<string, List<MemoryRelation>> ReadRelations(
+        SqliteConnection db,
+        SqliteTransaction? tx,
+        long memoryMax,
+        long relationMax)
+    {
+        using var command = CreateCommand(db, tx, """
+            SELECT r.memory_id,r.related_memory_id,r.kind,r.related_at,r.seq
+            FROM relations r JOIN memories m ON m.id=r.related_memory_id
+            WHERE r.seq<=$max AND m.seq<=$mem ORDER BY r.seq
+            """, ("$max", relationMax), ("$mem", memoryMax));
+        using var reader = command.ExecuteReader();
+        var relationsByMemory = new Dictionary<string, List<MemoryRelation>>(StringComparer.Ordinal);
+        while (reader.Read())
+        {
+            var memoryId = reader.GetString(0);
+            var relatedMemoryId = reader.GetString(1);
+            var kind = Enum.Parse<RelationKind>(reader.GetString(2), true);
+            var relatedAt = ParseTimestamp(reader.GetString(3));
+            var sequence = reader.GetInt64(4);
+            if (!relationsByMemory.TryGetValue(memoryId, out var relations))
+            {
+                relations = [];
+                relationsByMemory.Add(memoryId, relations);
+            }
+
+            relations.Add(new MemoryRelation(relatedMemoryId, kind, relatedAt, sequence));
+        }
+
+        return relationsByMemory;
+    }
+
+    public MemoryRecord? GetMemory(string id)
+    {
+        var snapshot = ReadSnapshot();
+        foreach (var memory in snapshot.Memories)
+        {
+            if (memory.Id == id)
+            {
+                return memory;
+            }
+        }
+
+        return null;
+    }
+
+    public IReadOnlyList<MemoryRecord> GetSourceMemories(string sourceId)
+    {
+        var snapshot = ReadSnapshot();
+        return SelectSourceMemories(snapshot.Memories, sourceId);
+    }
+
+    public IReadOnlyList<string> LexicalSearch(
+        string query,
+        int limit,
+        int? depth = null,
+        long? memoryHighWater = null)
+    {
+        if (limit < 1)
+        {
+            return [];
+        }
+
+        var searchExpression = BuildLexicalSearchExpression(query);
+        if (searchExpression.Length == 0)
+        {
+            return [];
+        }
+
+        using var db = OpenConnection();
+        using var command = CreateCommand(db, null, """
             SELECT m.id FROM memory_fts JOIN memories m ON m.seq=memory_fts.rowid
             WHERE memory_fts MATCH $query AND m.sealed=1 AND m.seq <= $max AND ($depth IS NULL OR m.depth=$depth)
             ORDER BY bm25(memory_fts),m.id LIMIT $limit
-            """, ("$query", match), ("$max", memoryHighWater ?? long.MaxValue), ("$depth", depth), ("$limit", limit));
+            """,
+            ("$query", searchExpression),
+            ("$max", memoryHighWater ?? long.MaxValue),
+            ("$depth", depth),
+            ("$limit", limit));
         using var reader = command.ExecuteReader();
         var ids = new List<string>();
-        while (reader.Read()) ids.Add(reader.GetString(0));
+        while (reader.Read())
+        {
+            ids.Add(reader.GetString(0));
+        }
+
         return ids;
+    }
+
+    private static string BuildLexicalSearchExpression(string query)
+    {
+        // User queries are text, never executable FTS syntax.
+        const int maximumTokens = 64;
+        var seenTokens = new HashSet<string>(StringComparer.Ordinal);
+        var quotedTokens = new List<string>();
+        var matches = Regex.Matches(query, @"[\p{L}\p{N}_]+", RegexOptions.CultureInvariant);
+        foreach (Match match in matches)
+        {
+            var token = match.Value;
+            if (!seenTokens.Add(token))
+            {
+                continue;
+            }
+
+            var escapedToken = token.Replace("\"", "\"\"", StringComparison.Ordinal);
+            quotedTokens.Add('"' + escapedToken + '"');
+            if (quotedTokens.Count == maximumTokens)
+            {
+                break;
+            }
+        }
+
+        return string.Join(" OR ", quotedTokens);
     }
 
     private static void CheckEmbedding(EmbeddingVector vector)
     {
-        if (string.IsNullOrWhiteSpace(vector.Space) || vector.Values.Length == 0 || vector.Values.Any(v => !float.IsFinite(v)) || vector.Values.All(v => v == 0))
-            throw new InvariantException("Embedding must be finite, nonzero and identify its model/dimensions.");
+        const string invalidEmbedding = "Embedding must be finite, nonzero and identify its model/dimensions.";
+        if (string.IsNullOrWhiteSpace(vector.Space) || vector.Values.Length == 0)
+        {
+            throw new InvariantException(invalidEmbedding);
+        }
+
+        var hasNonzeroValue = false;
+        foreach (var value in vector.Values)
+        {
+            if (!float.IsFinite(value))
+            {
+                throw new InvariantException(invalidEmbedding);
+            }
+
+            if (value != 0)
+            {
+                hasNonzeroValue = true;
+            }
+        }
+
+        if (!hasNonzeroValue)
+        {
+            throw new InvariantException(invalidEmbedding);
+        }
     }
 
     private static void SaveEmbedding(SqliteConnection db, SqliteTransaction? tx, string id, EmbeddingVector vector)
     {
         CheckEmbedding(vector);
-        var knownDimension = Scalar(db, tx, "SELECT dimensions FROM embeddings WHERE space=$space LIMIT 1", ("$space", vector.Space));
+        var knownDimension = ExecuteScalar(db, tx, "SELECT dimensions FROM embeddings WHERE space=$space LIMIT 1", ("$space", vector.Space));
         if (knownDimension is not null && Convert.ToInt32(knownDimension, CultureInfo.InvariantCulture) != vector.Values.Length)
+        {
             throw new InvariantException("Embedding dimensions changed within the same model space.");
-        Exec(db, tx, "INSERT INTO embeddings(memory_id,space,dimensions,vector_json) VALUES($id,$space,$dims,$vector) ON CONFLICT(memory_id,space) DO UPDATE SET vector_json=excluded.vector_json",
+        }
+
+        ExecuteNonQuery(db, tx, "INSERT INTO embeddings(memory_id,space,dimensions,vector_json) VALUES($id,$space,$dims,$vector) ON CONFLICT(memory_id,space) DO UPDATE SET vector_json=excluded.vector_json",
             ("$id", id), ("$space", vector.Space), ("$dims", vector.Values.Length), ("$vector", JsonSerializer.Serialize(vector.Values)));
     }
 
     public void SaveEmbedding(string memoryId, EmbeddingVector embedding)
     {
-        lock (_gate)
+        lock (_mutationGate)
         {
-            using var db = Open();
+            using var db = OpenConnection();
             using var tx = db.BeginTransaction();
             SaveEmbedding(db, tx, memoryId, embedding);
             tx.Commit();
@@ -373,48 +593,76 @@ public sealed class SqliteMemoryStore : IMemoryStore
 
     public EmbeddingVector? GetEmbedding(string memoryId, string space)
     {
-        using var db = Open();
-        var json = Scalar(db, null, "SELECT vector_json FROM embeddings WHERE memory_id=$id AND space=$space", ("$id", memoryId), ("$space", space)) as string;
+        using var db = OpenConnection();
+        var json = ExecuteScalar(db, null, "SELECT vector_json FROM embeddings WHERE memory_id=$id AND space=$space", ("$id", memoryId), ("$space", space)) as string;
         return json is null ? null : new EmbeddingVector(space, JsonSerializer.Deserialize<float[]>(json)!);
     }
 
     public IReadOnlyList<StoredEmbedding> GetEmbeddings(string space)
     {
-        using var db = Open();
-        using var command = Command(db, null, "SELECT memory_id,vector_json FROM embeddings WHERE space=$space ORDER BY memory_id", ("$space", space));
+        using var db = OpenConnection();
+        using var command = CreateCommand(db, null, "SELECT memory_id,vector_json FROM embeddings WHERE space=$space ORDER BY memory_id", ("$space", space));
         using var reader = command.ExecuteReader();
         var result = new List<StoredEmbedding>();
-        while (reader.Read()) result.Add(new StoredEmbedding(reader.GetString(0), new EmbeddingVector(space, JsonSerializer.Deserialize<float[]>(reader.GetString(1))!)));
+        while (reader.Read())
+        {
+            var memoryId = reader.GetString(0);
+            var vectorJson = reader.GetString(1);
+            var values = JsonSerializer.Deserialize<float[]>(vectorJson)!;
+            var embedding = new EmbeddingVector(space, values);
+            result.Add(new StoredEmbedding(memoryId, embedding));
+        }
+
         return result;
     }
 
+    // Recall history changes timestamps only; it never adds evidence or changes retrieval scores.
     public void RecordRecall(IReadOnlyList<string> ids, DateTimeOffset now)
     {
-        using var db = Open();
+        using var db = OpenConnection();
         using var tx = db.BeginTransaction();
-        foreach (var id in ids.Distinct(StringComparer.Ordinal))
+        var recalledIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var id in ids)
         {
-            Exec(db, tx, "INSERT INTO recall_events(memory_id,recalled_at) VALUES($id,$at)", ("$id", id), ("$at", Stamp(now)));
-            Exec(db, tx, "UPDATE memories SET last_recalled_at=CASE WHEN last_recalled_at IS NULL OR last_recalled_at<$at THEN $at ELSE last_recalled_at END WHERE id=$id", ("$id", id), ("$at", Stamp(now)));
+            if (!recalledIds.Add(id))
+            {
+                continue;
+            }
+
+            ExecuteNonQuery(db, tx, "INSERT INTO recall_events(memory_id,recalled_at) VALUES($id,$at)", ("$id", id), ("$at", FormatTimestamp(now)));
+            ExecuteNonQuery(db, tx, "UPDATE memories SET last_recalled_at=CASE WHEN last_recalled_at IS NULL OR last_recalled_at<$at THEN $at ELSE last_recalled_at END WHERE id=$id", ("$id", id), ("$at", FormatTimestamp(now)));
         }
         tx.Commit();
     }
 
-    public RunRecord GetOrCreateRun(RunKind kind, DateTimeOffset start, DateTimeOffset end, DateTimeOffset now, decimal? budgetUsd)
+    public RunRecord GetOrCreateRun(
+        RunKind kind,
+        DateTimeOffset start,
+        DateTimeOffset end,
+        DateTimeOffset now,
+        decimal? budgetUsd)
     {
-        if (start >= end) throw new InputException("Run period must have positive duration.");
-        if (kind == RunKind.Meditation && budgetUsd is not > 0) throw new InputException("Set MeditationBudgetUsd before running meditation.");
-        lock (_gate)
+        if (start >= end)
         {
-            using var db = Open();
+            throw new InputException("Run period must have positive duration.");
+        }
+
+        if (kind == RunKind.Meditation && budgetUsd is not > 0)
+        {
+            throw new InputException("Set MeditationBudgetUsd before running meditation.");
+        }
+
+        lock (_mutationGate)
+        {
+            using var db = OpenConnection();
             using var tx = db.BeginTransaction();
-            Exec(db, tx, """
+            ExecuteNonQuery(db, tx, """
                 INSERT OR IGNORE INTO runs(kind,period_start,period_end,started_at,memory_high_water,relation_high_water,recall_high_water,status,budget_usd)
                 SELECT $kind,$start,$end,$now,COALESCE((SELECT MAX(seq) FROM memories),0),COALESCE((SELECT MAX(seq) FROM relations),0),
                 COALESCE((SELECT MAX(seq) FROM recall_events),0),'running',$budget
-                """, ("$kind", kind.ToString().ToLowerInvariant()), ("$start", Stamp(start)), ("$end", Stamp(end)), ("$now", Stamp(now)),
+                """, ("$kind", kind.ToString().ToLowerInvariant()), ("$start", FormatTimestamp(start)), ("$end", FormatTimestamp(end)), ("$now", FormatTimestamp(now)),
                 ("$budget", kind == RunKind.Dream ? null : budgetUsd?.ToString(CultureInfo.InvariantCulture)));
-            using var command = Command(db, tx, RunSelect + " WHERE kind=$kind AND period_start=$start AND period_end=$end", ("$kind", kind.ToString().ToLowerInvariant()), ("$start", Stamp(start)), ("$end", Stamp(end)));
+            using var command = CreateCommand(db, tx, RunSelect + " WHERE kind=$kind AND period_start=$start AND period_end=$end", ("$kind", kind.ToString().ToLowerInvariant()), ("$start", FormatTimestamp(start)), ("$end", FormatTimestamp(end)));
             using var reader = command.ExecuteReader();
             reader.Read();
             var run = RunFrom(reader);
@@ -425,266 +673,390 @@ public sealed class SqliteMemoryStore : IMemoryStore
     }
 
     private const string RunSelect = "SELECT id,kind,period_start,period_end,started_at,memory_high_water,relation_high_water,recall_high_water,status,budget_usd FROM runs";
-    private static RunRecord RunFrom(SqliteDataReader reader) => new(reader.GetInt64(0), Enum.Parse<RunKind>(reader.GetString(1), true),
-        Time(reader.GetString(2)), Time(reader.GetString(3)), Time(reader.GetString(4)), reader.GetInt64(5), reader.GetInt64(6), reader.GetInt64(7),
-        reader.GetString(8), reader.IsDBNull(9) ? null : decimal.Parse(reader.GetString(9), CultureInfo.InvariantCulture));
+    private static RunRecord RunFrom(SqliteDataReader reader)
+    {
+        var id = reader.GetInt64(0);
+        var kind = Enum.Parse<RunKind>(reader.GetString(1), true);
+        var periodStart = ParseTimestamp(reader.GetString(2));
+        var periodEnd = ParseTimestamp(reader.GetString(3));
+        var startedAt = ParseTimestamp(reader.GetString(4));
+        var memoryHighWater = reader.GetInt64(5);
+        var relationHighWater = reader.GetInt64(6);
+        var recallHighWater = reader.GetInt64(7);
+        var status = reader.GetString(8);
+        decimal? budgetUsd = reader.IsDBNull(9)
+            ? null
+            : decimal.Parse(reader.GetString(9), CultureInfo.InvariantCulture);
+
+        return new RunRecord(
+            id, kind, periodStart, periodEnd, startedAt,
+            memoryHighWater, relationHighWater, recallHighWater, status, budgetUsd);
+    }
 
     public IReadOnlyList<RunRecord> GetRuns()
     {
-        using var db = Open();
-        using var command = Command(db, null, RunSelect + " ORDER BY id");
+        using var db = OpenConnection();
+        using var command = CreateCommand(db, null, RunSelect + " ORDER BY id");
         using var reader = command.ExecuteReader();
         var result = new List<RunRecord>();
-        while (reader.Read()) result.Add(RunFrom(reader));
+        while (reader.Read())
+        {
+            result.Add(RunFrom(reader));
+        }
+
         return result;
     }
 
     public void EnsureWorkItems(long runId, IReadOnlyList<WorkSeed> items)
     {
-        using var db = Open();
+        using var db = OpenConnection();
         using var tx = db.BeginTransaction();
-        if (Convert.ToInt32(Scalar(db, tx, "SELECT work_initialized FROM runs WHERE id=$id", ("$id", runId)), CultureInfo.InvariantCulture) != 0) return;
+        var initializedValue = ExecuteScalar(db, tx,
+            "SELECT work_initialized FROM runs WHERE id=$id", ("$id", runId));
+        var workInitialized = Convert.ToInt32(initializedValue, CultureInfo.InvariantCulture) != 0;
+        if (workInitialized)
+        {
+            return;
+        }
+
         foreach (var item in items)
-            Exec(db, tx, "INSERT INTO run_work(run_id,work_key,phase,memory_id,ordinal,status) VALUES($run,$key,$phase,$memory,$ordinal,'pending')",
+        {
+            ExecuteNonQuery(db, tx, "INSERT INTO run_work(run_id,work_key,phase,memory_id,ordinal,status) VALUES($run,$key,$phase,$memory,$ordinal,'pending')",
                 ("$run", runId), ("$key", item.Key), ("$phase", item.Phase), ("$memory", item.MemoryId), ("$ordinal", item.Ordinal));
-        Exec(db, tx, "UPDATE runs SET work_initialized=1 WHERE id=$id", ("$id", runId));
+        }
+
+        ExecuteNonQuery(db, tx, "UPDATE runs SET work_initialized=1 WHERE id=$id", ("$id", runId));
         tx.Commit();
     }
 
     public IReadOnlyList<RunWorkItem> GetWorkItems(long runId)
     {
-        using var db = Open();
-        using var command = Command(db, null, "SELECT run_id,work_key,phase,memory_id,ordinal,status,proposal_json,model FROM run_work WHERE run_id=$id ORDER BY ordinal,work_key", ("$id", runId));
+        using var db = OpenConnection();
+        using var command = CreateCommand(db, null, "SELECT run_id,work_key,phase,memory_id,ordinal,status,proposal_json,model FROM run_work WHERE run_id=$id ORDER BY ordinal,work_key", ("$id", runId));
         using var reader = command.ExecuteReader();
         var result = new List<RunWorkItem>();
-        while (reader.Read()) result.Add(new RunWorkItem(reader.GetInt64(0), reader.GetString(1), reader.GetString(2), reader.GetString(3), reader.GetInt32(4), reader.GetString(5), reader.IsDBNull(6) ? null : reader.GetString(6), reader.IsDBNull(7) ? null : reader.GetString(7)));
+        while (reader.Read())
+        {
+            var itemRunId = reader.GetInt64(0);
+            var key = reader.GetString(1);
+            var phase = reader.GetString(2);
+            var memoryId = reader.GetString(3);
+            var ordinal = reader.GetInt32(4);
+            var status = reader.GetString(5);
+            var proposalJson = reader.IsDBNull(6) ? null : reader.GetString(6);
+            var model = reader.IsDBNull(7) ? null : reader.GetString(7);
+            result.Add(new RunWorkItem(
+                itemRunId, key, phase, memoryId, ordinal, status, proposalJson, model));
+        }
+
         return result;
     }
 
     public void SaveWorkProposal(long runId, string key, string proposalJson, string model)
     {
-        using var db = Open();
-        Exec(db, null, "UPDATE run_work SET proposal_json=$json,model=$model WHERE run_id=$run AND work_key=$key AND proposal_json IS NULL",
+        using var db = OpenConnection();
+        ExecuteNonQuery(db, null, "UPDATE run_work SET proposal_json=$json,model=$model WHERE run_id=$run AND work_key=$key AND proposal_json IS NULL",
             ("$json", proposalJson), ("$model", model), ("$run", runId), ("$key", key));
     }
 
     public void CompleteWork(long runId, string key)
     {
-        using var db = Open();
-        Exec(db, null, "UPDATE run_work SET status='complete' WHERE run_id=$run AND work_key=$key", ("$run", runId), ("$key", key));
+        using var db = OpenConnection();
+        ExecuteNonQuery(db, null, "UPDATE run_work SET status='complete' WHERE run_id=$run AND work_key=$key", ("$run", runId), ("$key", key));
     }
 
     public void RejectProposal(long runId, string key, int index, string reason)
     {
-        using var db = Open();
-        Exec(db, null, "INSERT OR IGNORE INTO rejected_proposals(run_id,work_key,proposal_index,reason) VALUES($run,$key,$index,$reason)",
+        using var db = OpenConnection();
+        ExecuteNonQuery(db, null, "INSERT OR IGNORE INTO rejected_proposals(run_id,work_key,proposal_index,reason) VALUES($run,$key,$index,$reason)",
             ("$run", runId), ("$key", key), ("$index", index), ("$reason", reason));
     }
 
     public int GetRejectedProposalCount(long runId)
     {
-        using var db = Open();
-        return Convert.ToInt32(Scalar(db, null, "SELECT COUNT(*) FROM rejected_proposals WHERE run_id=$id", ("$id", runId)), CultureInfo.InvariantCulture);
+        using var db = OpenConnection();
+        return Convert.ToInt32(ExecuteScalar(db, null, "SELECT COUNT(*) FROM rejected_proposals WHERE run_id=$id", ("$id", runId)), CultureInfo.InvariantCulture);
     }
 
-    private (int Depth, HashSet<string> Roots) CheckAbstraction(SqliteConnection db, SqliteTransaction? tx, AbstractionProposal proposal, RunRecord run, IReadOnlyCollection<string> allowedParents)
+    private (int Depth, HashSet<string> Roots) ValidateParentsAndCollectRoots(
+        SqliteConnection db,
+        SqliteTransaction? tx,
+        AbstractionProposal proposal,
+        RunRecord evidenceRun,
+        IReadOnlyCollection<string> allowedParents)
     {
         CheckContent(proposal.Content);
-        if (proposal.DerivedFrom.Count < _options.RootBase || proposal.DerivedFrom.Distinct(StringComparer.Ordinal).Count() != proposal.DerivedFrom.Count)
-            throw new InvariantException("Abstraction requires at least B distinct parents.");
-        var allowed = allowedParents.ToHashSet(StringComparer.Ordinal);
-        int? parentDepth = null;
-        var roots = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var parent in proposal.DerivedFrom)
+        var distinctParents = new HashSet<string>(proposal.DerivedFrom, StringComparer.Ordinal);
+        if (proposal.DerivedFrom.Count < _options.RootBase ||
+            distinctParents.Count != proposal.DerivedFrom.Count)
         {
-            if (!allowed.Contains(parent)) throw new InvariantException("Parent was not provided to the model.");
-            using (var command = Command(db, tx, "SELECT depth,dream_revision,seq FROM memories WHERE id=$id AND sealed=1", ("$id", parent)))
+            throw new InvariantException("Abstraction requires at least B distinct parents.");
+        }
+
+        var allowedParentIds = new HashSet<string>(allowedParents, StringComparer.Ordinal);
+        int? parentDepth = null;
+        var sourceRoots = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var parentId in proposal.DerivedFrom)
+        {
+            if (!allowedParentIds.Contains(parentId))
+            {
+                throw new InvariantException("Parent was not provided to the model.");
+            }
+
+            using (var command = CreateCommand(db, tx, """
+                SELECT depth,dream_revision,seq FROM memories WHERE id=$id AND sealed=1
+                """, ("$id", parentId)))
             using (var reader = command.ExecuteReader())
             {
-                if (!reader.Read()) throw new InvariantException("Parent does not exist.");
-                if (reader.GetInt64(1) >= run.Id || reader.GetInt64(2) > run.MemoryHighWater) throw new InvariantException("Parent violates the run generation barrier.");
+                if (!reader.Read())
+                {
+                    throw new InvariantException("Parent does not exist.");
+                }
+
+                var parentRevision = reader.GetInt64(1);
+                var parentSequence = reader.GetInt64(2);
+                if (parentRevision >= evidenceRun.Id || parentSequence > evidenceRun.MemoryHighWater)
+                {
+                    throw new InvariantException("Parent violates the run generation barrier.");
+                }
+
                 var depth = reader.GetInt32(0);
-                if (parentDepth is not null && parentDepth != depth) throw new InvariantException("Parents must have the same depth.");
+                if (parentDepth is not null && parentDepth != depth)
+                {
+                    throw new InvariantException("Parents must have the same depth.");
+                }
+
                 parentDepth = depth;
             }
-            using var rootCommand = Command(db, tx, "SELECT source_id FROM memory_roots WHERE memory_id=$id", ("$id", parent));
+
+            // Count distinct sources across all parents, including parents that share evidence.
+            using var rootCommand = CreateCommand(db, tx,
+                "SELECT source_id FROM memory_roots WHERE memory_id=$id", ("$id", parentId));
             using var rootReader = rootCommand.ExecuteReader();
-            while (rootReader.Read()) roots.Add(rootReader.GetString(0));
+            while (rootReader.Read())
+            {
+                sourceRoots.Add(rootReader.GetString(0));
+            }
         }
+
         var childDepth = checked(parentDepth!.Value + 1);
-        if (new BigInteger(roots.Count) < BigInteger.Pow(_options.RootBase, childDepth))
-            throw new InvariantException("Insufficient distinct Source roots for B^depth.");
-        // New IDs and strictly decreasing parent depth make cycles impossible.
-        return (childDepth, roots);
-    }
-
-    public void ValidateAbstraction(AbstractionProposal proposal, RunRecord run, IReadOnlyCollection<string> allowedParents)
-    {
-        using var db = Open();
-        _ = CheckAbstraction(db, null, proposal, run, allowedParents);
-    }
-
-    public MemoryRecord AddAbstraction(AbstractionProposal proposal, string model, RunRecord run, string workKey, int proposalIndex,
-        IReadOnlyCollection<string> allowedParents, EmbeddingVector embedding, DateTimeOffset now)
-    {
-        var origin = $"run:{run.Id}:{workKey}:{proposalIndex}";
-        string id;
-        lock (_gate)
+        var minimumSourceRoots = BigInteger.Pow(_options.RootBase, childDepth);
+        if (new BigInteger(sourceRoots.Count) < minimumSourceRoots)
         {
-            using var db = Open();
+            throw new InvariantException("Insufficient distinct Source roots for B^depth.");
+        }
+
+        // New IDs and strictly decreasing parent depth make cycles impossible.
+        return (childDepth, sourceRoots);
+    }
+
+    public void ValidateAbstraction(
+        AbstractionProposal proposal,
+        RunRecord run,
+        IReadOnlyCollection<string> allowedParents)
+    {
+        using var db = OpenConnection();
+        _ = ValidateParentsAndCollectRoots(db, null, proposal, run, allowedParents);
+    }
+
+    public MemoryRecord AddAbstraction(
+        AbstractionProposal proposal,
+        string model,
+        RunRecord run,
+        string workKey,
+        int proposalIndex,
+        IReadOnlyCollection<string> allowedParents,
+        EmbeddingVector embedding,
+        DateTimeOffset now)
+    {
+        var originKey = $"run:{run.Id}:{workKey}:{proposalIndex}";
+        string memoryId;
+        lock (_mutationGate)
+        {
+            using var db = OpenConnection();
             using var tx = db.BeginTransaction();
-            var existing = Scalar(db, tx, "SELECT id FROM memories WHERE origin_key=$origin", ("$origin", origin)) as string;
-            if (existing is not null) { tx.Commit(); return GetMemory(existing)!; }
-            if (Scalar(db, tx, "SELECT status FROM runs WHERE id=$id", ("$id", run.Id)) as string is not ("running" or "budget_exhausted"))
+            var existingMemoryId = ExecuteScalar(db, tx,
+                "SELECT id FROM memories WHERE origin_key=$origin", ("$origin", originKey)) as string;
+            if (existingMemoryId is not null)
+            {
+                tx.Commit();
+                return GetMemory(existingMemoryId)!;
+            }
+
+            // A later week may finish work owned by a budget-exhausted run.
+            // Its origin and evidence run stay fixed even though API charges go to the later week.
+            var runStatus = ExecuteScalar(db, tx,
+                "SELECT status FROM runs WHERE id=$id", ("$id", run.Id)) as string;
+            if (runStatus is not ("running" or "budget_exhausted"))
+            {
                 throw new InvariantException("Cannot add a memory to a finished run.");
-            var (depth, roots) = CheckAbstraction(db, tx, proposal, run, allowedParents);
+            }
+
+            // Revalidate inside the transaction, even if the caller checked before paying for embedding.
+            var (depth, sourceRoots) = ValidateParentsAndCollectRoots(db, tx, proposal, run, allowedParents);
             CheckEmbedding(embedding);
-            id = Id("mem_");
-            InsertMemory(db, tx, id, depth, proposal.Content, null, now, run.Id, model, origin);
-            foreach (var parent in proposal.DerivedFrom)
-                Exec(db, tx, "INSERT INTO derived_from(child_id,parent_id) VALUES($child,$parent)", ("$child", id), ("$parent", parent));
-            foreach (var root in roots)
-                Exec(db, tx, "INSERT INTO memory_roots(memory_id,source_id) VALUES($id,$source)", ("$id", id), ("$source", root));
-            Exec(db, tx, "UPDATE memories SET sealed=1 WHERE id=$id", ("$id", id));
-            SaveEmbedding(db, tx, id, embedding);
+            memoryId = CreateId("mem_");
+            InsertMemory(db, tx, memoryId, depth, proposal.Content, null, now, run.Id, model, originKey);
+
+            foreach (var parentId in proposal.DerivedFrom)
+            {
+                ExecuteNonQuery(db, tx,
+                    "INSERT INTO derived_from(child_id,parent_id) VALUES($child,$parent)",
+                    ("$child", memoryId), ("$parent", parentId));
+            }
+
+            foreach (var sourceId in sourceRoots)
+            {
+                ExecuteNonQuery(db, tx,
+                    "INSERT INTO memory_roots(memory_id,source_id) VALUES($id,$source)",
+                    ("$id", memoryId), ("$source", sourceId));
+            }
+
+            // Sealing fixes provenance; publish it together with its embedding in the same commit.
+            ExecuteNonQuery(db, tx, "UPDATE memories SET sealed=1 WHERE id=$id", ("$id", memoryId));
+            SaveEmbedding(db, tx, memoryId, embedding);
             tx.Commit();
         }
-        return GetMemory(id)!;
+
+        return GetMemory(memoryId)!;
     }
 
     public MemoryRecord? GetAppliedAbstraction(long runId, string workKey, int proposalIndex)
     {
-        using var db = Open();
-        var id = Scalar(db, null, "SELECT id FROM memories WHERE origin_key=$origin", ("$origin", $"run:{runId}:{workKey}:{proposalIndex}")) as string;
+        using var db = OpenConnection();
+        var id = ExecuteScalar(db, null, "SELECT id FROM memories WHERE origin_key=$origin", ("$origin", $"run:{runId}:{workKey}:{proposalIndex}")) as string;
         return id is null ? null : GetMemory(id);
     }
 
     public void AddRelation(RelationProposal proposal, RunRecord run, DateTimeOffset now)
     {
-        if (proposal.MemoryId == proposal.RelatedMemoryId || !Enum.IsDefined(proposal.Kind)) throw new InvariantException("Invalid relation.");
-        using var db = Open();
+        if (proposal.MemoryId == proposal.RelatedMemoryId || !Enum.IsDefined(proposal.Kind))
+        {
+            throw new InvariantException("Invalid relation.");
+        }
+
+        using var db = OpenConnection();
         using var tx = db.BeginTransaction();
         foreach (var id in new[] { proposal.MemoryId, proposal.RelatedMemoryId })
         {
-            var count = Convert.ToInt32(Scalar(db, tx, "SELECT COUNT(*) FROM memories WHERE id=$id AND seq<=$max AND dream_revision<$revision AND sealed=1",
+            var count = Convert.ToInt32(ExecuteScalar(db, tx, "SELECT COUNT(*) FROM memories WHERE id=$id AND seq<=$max AND dream_revision<$revision AND sealed=1",
                 ("$id", id), ("$max", run.MemoryHighWater), ("$revision", run.Id)), CultureInfo.InvariantCulture);
-            if (count != 1) throw new InvariantException("Relation references a memory outside the run snapshot.");
+            if (count != 1)
+            {
+                throw new InvariantException("Relation references a memory outside the run snapshot.");
+            }
         }
-        Exec(db, tx, "INSERT OR IGNORE INTO relations(memory_id,related_memory_id,kind,related_at,run_id) VALUES($a,$b,$kind,$at,$run)",
-            ("$a", proposal.MemoryId), ("$b", proposal.RelatedMemoryId), ("$kind", proposal.Kind.ToString().ToLowerInvariant()), ("$at", Stamp(now)), ("$run", run.Id));
+        ExecuteNonQuery(db, tx, "INSERT OR IGNORE INTO relations(memory_id,related_memory_id,kind,related_at,run_id) VALUES($a,$b,$kind,$at,$run)",
+            ("$a", proposal.MemoryId), ("$b", proposal.RelatedMemoryId), ("$kind", proposal.Kind.ToString().ToLowerInvariant()), ("$at", FormatTimestamp(now)), ("$run", run.Id));
         tx.Commit();
     }
 
     public void FinishRun(long runId, string status, DateTimeOffset now)
     {
-        if (status is not ("complete" or "budget_exhausted")) throw new InputException("Unsupported terminal run status.");
-        using var db = Open();
-        Exec(db, null, "UPDATE runs SET status=$status,finished_at=$at WHERE id=$id AND status='running'", ("$status", status), ("$at", Stamp(now)), ("$id", runId));
+        if (status is not ("complete" or "budget_exhausted"))
+        {
+            throw new InputException("Unsupported terminal run status.");
+        }
+
+        using var db = OpenConnection();
+        ExecuteNonQuery(db, null, "UPDATE runs SET status=$status,finished_at=$at WHERE id=$id AND status='running'", ("$status", status), ("$at", FormatTimestamp(now)), ("$id", runId));
     }
 
-    public UsageReservation ReserveUsage(long? runId, string model, string operation, decimal maximumUsd, DateTimeOffset now)
+    // Budget check and reservation share a transaction so concurrent requests cannot overspend.
+    public UsageReservation ReserveUsage(
+        long? runId,
+        string model,
+        string operation,
+        decimal maximumUsd,
+        DateTimeOffset now)
     {
-        if (maximumUsd < 0) throw new InputException("Usage reservation must not be negative.");
-        using var db = Open();
+        if (maximumUsd < 0)
+        {
+            throw new InputException("Usage reservation must not be negative.");
+        }
+
+        using var db = OpenConnection();
         using var tx = db.BeginTransaction();
         if (runId is not null)
         {
-            var budgetText = Scalar(db, tx, "SELECT budget_usd FROM runs WHERE id=$id AND status='running'", ("$id", runId.Value)) as string;
-            if (Convert.ToInt32(Scalar(db, tx, "SELECT COUNT(*) FROM runs WHERE id=$id AND status='running'", ("$id", runId.Value)), CultureInfo.InvariantCulture) != 1)
+            var budgetText = ExecuteScalar(db, tx, "SELECT budget_usd FROM runs WHERE id=$id AND status='running'", ("$id", runId.Value)) as string;
+            var activeRunCount = ExecuteScalar(db, tx,
+                "SELECT COUNT(*) FROM runs WHERE id=$id AND status='running'", ("$id", runId.Value));
+            if (Convert.ToInt32(activeRunCount, CultureInfo.InvariantCulture) != 1)
+            {
                 throw new InvariantException("Cannot charge an inactive run.");
-            if (budgetText is not null && Accounted(db, tx, runId.Value) + maximumUsd > decimal.Parse(budgetText, CultureInfo.InvariantCulture))
-                throw new BudgetExceededException("Next API request's maximum cost exceeds the remaining meditation budget.");
+            }
+
+            if (budgetText is not null)
+            {
+                var accountedUsd = ReadAccountedUsageUsd(db, tx, runId.Value);
+                var budgetUsd = decimal.Parse(budgetText, CultureInfo.InvariantCulture);
+                if (accountedUsd + maximumUsd > budgetUsd)
+                {
+                    throw new BudgetExceededException(
+                        "Next API request's maximum cost exceeds the remaining meditation budget.");
+                }
+            }
         }
-        var reservation = new UsageReservation(Id("call_"), runId, model, operation, maximumUsd);
-        Exec(db, tx, "INSERT INTO api_calls(id,run_id,model,operation,reserved_usd,created_at) VALUES($id,$run,$model,$op,$cost,$at)",
-            ("$id", reservation.Id), ("$run", runId), ("$model", model), ("$op", operation), ("$cost", maximumUsd.ToString(CultureInfo.InvariantCulture)), ("$at", Stamp(now)));
+        var reservation = new UsageReservation(CreateId("call_"), runId, model, operation, maximumUsd);
+        ExecuteNonQuery(db, tx, "INSERT INTO api_calls(id,run_id,model,operation,reserved_usd,created_at) VALUES($id,$run,$model,$op,$cost,$at)",
+            ("$id", reservation.Id), ("$run", runId), ("$model", model), ("$op", operation), ("$cost", maximumUsd.ToString(CultureInfo.InvariantCulture)), ("$at", FormatTimestamp(now)));
         tx.Commit();
         return reservation;
     }
 
     public void CompleteUsage(string reservationId, ApiUsage usage, DateTimeOffset now)
     {
-        if (usage.InputTokens < 0 || usage.CachedInputTokens < 0 || usage.CacheWriteTokens < 0 || usage.OutputTokens < 0 || usage.CostUsd < 0 || usage.CachedInputTokens + usage.CacheWriteTokens > usage.InputTokens)
+        if (usage.InputTokens < 0 ||
+            usage.CachedInputTokens < 0 ||
+            usage.CacheWriteTokens < 0 ||
+            usage.OutputTokens < 0 ||
+            usage.CostUsd < 0 ||
+            usage.CachedInputTokens + usage.CacheWriteTokens > usage.InputTokens)
+        {
             throw new InvariantException("Invalid API usage.");
-        using var db = Open();
-        Exec(db, null, "UPDATE api_calls SET actual_usd=$cost,usage_json=$json,completed_at=$at WHERE id=$id AND completed_at IS NULL",
-            ("$cost", usage.CostUsd.ToString(CultureInfo.InvariantCulture)), ("$json", JsonSerializer.Serialize(usage, JsonDefaults.Options)), ("$at", Stamp(now)), ("$id", reservationId));
+        }
+
+        using var db = OpenConnection();
+        ExecuteNonQuery(db, null, "UPDATE api_calls SET actual_usd=$cost,usage_json=$json,completed_at=$at WHERE id=$id AND completed_at IS NULL",
+            ("$cost", usage.CostUsd.ToString(CultureInfo.InvariantCulture)), ("$json", JsonSerializer.Serialize(usage, JsonDefaults.Options)), ("$at", FormatTimestamp(now)), ("$id", reservationId));
     }
 
-    private static decimal Accounted(SqliteConnection db, SqliteTransaction? tx, long runId)
+    private static decimal ReadAccountedUsageUsd(SqliteConnection db, SqliteTransaction? tx, long runId)
     {
-        using var command = Command(db, tx, "SELECT COALESCE(actual_usd,reserved_usd) FROM api_calls WHERE run_id=$id", ("$id", runId));
+        using var command = CreateCommand(db, tx, "SELECT COALESCE(actual_usd,reserved_usd) FROM api_calls WHERE run_id=$id", ("$id", runId));
         using var reader = command.ExecuteReader();
-        decimal sum = 0;
-        while (reader.Read()) sum += decimal.Parse(reader.GetString(0), CultureInfo.InvariantCulture);
-        return sum;
+        decimal accountedUsd = 0;
+        while (reader.Read())
+        {
+            accountedUsd += decimal.Parse(reader.GetString(0), CultureInfo.InvariantCulture);
+        }
+
+        return accountedUsd;
     }
 
-    public decimal GetRunAccountedUsd(long runId) { using var db = Open(); return Accounted(db, null, runId); }
-    public string? GetState(string key) { using var db = Open(); return Scalar(db, null, "SELECT value FROM state WHERE key=$key", ("$key", key)) as string; }
+    public decimal GetRunAccountedUsd(long runId)
+    {
+        using var db = OpenConnection();
+        return ReadAccountedUsageUsd(db, null, runId);
+    }
+
+    public string? GetState(string key)
+    {
+        using var db = OpenConnection();
+        return ExecuteScalar(db, null, "SELECT value FROM state WHERE key=$key", ("$key", key)) as string;
+    }
+
     public void SetState(string key, string value)
     {
-        if (key == "root_base") throw new InvariantException("Root base is an immutable corpus setting.");
-        using var db = Open();
-        Exec(db, null, "INSERT INTO state(key,value) VALUES($key,$value) ON CONFLICT(key) DO UPDATE SET value=excluded.value", ("$key", key), ("$value", value));
+        if (key == "root_base")
+        {
+            throw new InvariantException("Root base is an immutable corpus setting.");
+        }
+
+        using var db = OpenConnection();
+        ExecuteNonQuery(db, null, "INSERT INTO state(key,value) VALUES($key,$value) ON CONFLICT(key) DO UPDATE SET value=excluded.value", ("$key", key), ("$value", value));
     }
 
-    private const string Schema = """
-        CREATE TABLE IF NOT EXISTS state(key TEXT PRIMARY KEY,value TEXT NOT NULL);
-        INSERT OR IGNORE INTO state(key,value) VALUES('schema_version','1');
-        CREATE TABLE IF NOT EXISTS sources(
-            id TEXT PRIMARY KEY,content_hash TEXT NOT NULL UNIQUE,relative_path TEXT NOT NULL UNIQUE,
-            created_at TEXT NOT NULL,status TEXT NOT NULL CHECK(status IN ('pending','processing','complete','failed')));
-        CREATE TABLE IF NOT EXISTS memories(
-            seq INTEGER PRIMARY KEY AUTOINCREMENT,id TEXT NOT NULL UNIQUE,depth INTEGER NOT NULL CHECK(depth>=0),
-            content TEXT NOT NULL CHECK(length(content)>0),source_ref TEXT REFERENCES sources(id),created_at TEXT NOT NULL,
-            dream_revision INTEGER NOT NULL CHECK(dream_revision>=0),last_recalled_at TEXT,created_by_model TEXT NOT NULL,
-            origin_key TEXT NOT NULL UNIQUE,sealed INTEGER NOT NULL DEFAULT 0 CHECK(sealed IN (0,1)),
-            CHECK((depth=0 AND source_ref IS NOT NULL AND dream_revision=0) OR (depth>0 AND source_ref IS NULL AND dream_revision>0)));
-        CREATE TABLE IF NOT EXISTS derived_from(child_id TEXT REFERENCES memories(id),parent_id TEXT REFERENCES memories(id),PRIMARY KEY(child_id,parent_id),CHECK(child_id<>parent_id));
-        CREATE TABLE IF NOT EXISTS memory_roots(memory_id TEXT REFERENCES memories(id),source_id TEXT REFERENCES sources(id),PRIMARY KEY(memory_id,source_id));
-        CREATE TABLE IF NOT EXISTS runs(
-            id INTEGER PRIMARY KEY AUTOINCREMENT,kind TEXT NOT NULL CHECK(kind IN ('dream','meditation')),period_start TEXT NOT NULL,period_end TEXT NOT NULL,
-            started_at TEXT NOT NULL,memory_high_water INTEGER NOT NULL,relation_high_water INTEGER NOT NULL,recall_high_water INTEGER NOT NULL,
-            status TEXT NOT NULL, budget_usd TEXT,finished_at TEXT,work_initialized INTEGER NOT NULL DEFAULT 0,UNIQUE(kind,period_start,period_end));
-        CREATE TABLE IF NOT EXISTS relations(
-            seq INTEGER PRIMARY KEY AUTOINCREMENT,memory_id TEXT NOT NULL REFERENCES memories(id),related_memory_id TEXT NOT NULL REFERENCES memories(id),
-            kind TEXT NOT NULL CHECK(kind IN ('positive','negative')),related_at TEXT NOT NULL,run_id INTEGER NOT NULL REFERENCES runs(id),
-            UNIQUE(memory_id,related_memory_id,kind),CHECK(memory_id<>related_memory_id));
-        CREATE INDEX IF NOT EXISTS relations_owner_time ON relations(memory_id,related_at);
-        CREATE TABLE IF NOT EXISTS recall_events(seq INTEGER PRIMARY KEY AUTOINCREMENT,memory_id TEXT NOT NULL REFERENCES memories(id),recalled_at TEXT NOT NULL);
-        CREATE INDEX IF NOT EXISTS recall_time ON recall_events(recalled_at);
-        CREATE TABLE IF NOT EXISTS embeddings(memory_id TEXT REFERENCES memories(id),space TEXT NOT NULL,dimensions INTEGER NOT NULL,vector_json TEXT NOT NULL,PRIMARY KEY(memory_id,space));
-        CREATE TABLE IF NOT EXISTS run_work(run_id INTEGER REFERENCES runs(id),work_key TEXT,phase TEXT NOT NULL,memory_id TEXT NOT NULL REFERENCES memories(id),ordinal INTEGER NOT NULL,
-            status TEXT NOT NULL,proposal_json TEXT,model TEXT,PRIMARY KEY(run_id,work_key));
-        CREATE TABLE IF NOT EXISTS rejected_proposals(run_id INTEGER REFERENCES runs(id),work_key TEXT,proposal_index INTEGER,reason TEXT NOT NULL,PRIMARY KEY(run_id,work_key,proposal_index));
-        CREATE TABLE IF NOT EXISTS api_calls(id TEXT PRIMARY KEY,run_id INTEGER REFERENCES runs(id),model TEXT NOT NULL,operation TEXT NOT NULL,
-            reserved_usd TEXT NOT NULL,actual_usd TEXT,usage_json TEXT,created_at TEXT NOT NULL,completed_at TEXT);
-        CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(id,content,content='memories',content_rowid='seq',tokenize='unicode61');
-        CREATE TRIGGER IF NOT EXISTS memories_search AFTER INSERT ON memories BEGIN
-            INSERT INTO memory_fts(rowid,id,content) VALUES(new.seq,new.id,new.content);
-        END;
-        CREATE TRIGGER IF NOT EXISTS immutable_memory BEFORE UPDATE ON memories
-        WHEN old.id IS NOT new.id OR old.depth IS NOT new.depth OR old.content IS NOT new.content OR old.source_ref IS NOT new.source_ref
-            OR old.created_at IS NOT new.created_at OR old.dream_revision IS NOT new.dream_revision OR old.created_by_model IS NOT new.created_by_model
-            OR old.origin_key IS NOT new.origin_key OR old.seq IS NOT new.seq OR (old.sealed=1 AND new.sealed<>1)
-        BEGIN SELECT RAISE(ABORT,'Memory content and provenance are immutable'); END;
-        CREATE TRIGGER IF NOT EXISTS no_memory_delete BEFORE DELETE ON memories BEGIN SELECT RAISE(ABORT,'Memory history is immutable'); END;
-        CREATE TRIGGER IF NOT EXISTS immutable_source BEFORE UPDATE ON sources
-        WHEN old.id IS NOT new.id OR old.content_hash IS NOT new.content_hash OR old.relative_path IS NOT new.relative_path OR old.created_at IS NOT new.created_at
-        BEGIN SELECT RAISE(ABORT,'Source metadata is immutable'); END;
-        CREATE TRIGGER IF NOT EXISTS no_source_delete BEFORE DELETE ON sources BEGIN SELECT RAISE(ABORT,'Sources are immutable'); END;
-        CREATE TRIGGER IF NOT EXISTS parent_layer BEFORE INSERT ON derived_from
-        WHEN (SELECT sealed FROM memories WHERE id=new.child_id)<>0 OR
-             (SELECT depth FROM memories WHERE id=new.child_id)<>(SELECT depth+1 FROM memories WHERE id=new.parent_id)
-        BEGIN SELECT RAISE(ABORT,'Parents must be fixed at birth and exactly one depth below'); END;
-        CREATE TRIGGER IF NOT EXISTS no_parent_update BEFORE UPDATE ON derived_from BEGIN SELECT RAISE(ABORT,'Parents are immutable'); END;
-        CREATE TRIGGER IF NOT EXISTS no_parent_delete BEFORE DELETE ON derived_from BEGIN SELECT RAISE(ABORT,'Parents are immutable'); END;
-        CREATE TRIGGER IF NOT EXISTS roots_birth BEFORE INSERT ON memory_roots WHEN (SELECT sealed FROM memories WHERE id=new.memory_id)<>0
-        BEGIN SELECT RAISE(ABORT,'Roots are fixed at birth'); END;
-        CREATE TRIGGER IF NOT EXISTS no_root_update BEFORE UPDATE ON memory_roots BEGIN SELECT RAISE(ABORT,'Roots are immutable'); END;
-        CREATE TRIGGER IF NOT EXISTS no_root_delete BEFORE DELETE ON memory_roots BEGIN SELECT RAISE(ABORT,'Roots are immutable'); END;
-        CREATE TRIGGER IF NOT EXISTS no_relation_update BEFORE UPDATE ON relations BEGIN SELECT RAISE(ABORT,'Relation records are immutable'); END;
-        CREATE TRIGGER IF NOT EXISTS no_relation_delete BEFORE DELETE ON relations BEGIN SELECT RAISE(ABORT,'Relation records are immutable'); END;
-        """;
+
 }

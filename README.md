@@ -32,5 +32,6 @@ dotnet test LongJourney.slnx
 - [Phase 1~3 구현 계획](docs/03-implementation-plan.md)
 - [OpenAI API 사용 확정](docs/04-openai-api.md)
 - [설정·스케줄·비용·복구 운영 안내](docs/05-operations.md)
+- [코드 작성 기준](docs/06-code-style.md)
 
 기본 모델은 Remember `gpt-5.6-terra/low`, Recall `gpt-5.6-terra/medium`, Dream `gpt-5.6-terra/high`, Meditation `gpt-5.6-sol/high`, embedding `text-embedding-3-large`다. 모든 운영 semantic processing은 OpenAI Responses/Embeddings API로 수행한다.

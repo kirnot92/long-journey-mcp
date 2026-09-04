@@ -202,7 +202,11 @@ public sealed class OpenAiCognitionTests
     {
         var model = new ModelOptions();
         Assert.Equal((272000m * 2 + 100 * 12) / 1_000_000m, OpenAiPricing.Calculate(model, 272000, 0, 0, 100));
-        var expected = ((272001m - 1000 - 2000) * 2 * 2 + 1000 * 0.2m * 2 + 2000 * 2.5m * 2 + 100 * 12 * 1.5m) / 1_000_000m;
+        var uncachedInputCost = (272001m - 1000 - 2000) * 2 * 2;
+        var cachedInputCost = 1000 * 0.2m * 2;
+        var cacheWriteCost = 2000 * 2.5m * 2;
+        var outputCost = 100 * 12 * 1.5m;
+        var expected = (uncachedInputCost + cachedInputCost + cacheWriteCost + outputCost) / 1_000_000m;
         Assert.Equal(expected, OpenAiPricing.Calculate(model, 272001, 1000, 2000, 100));
         Assert.True(OpenAiPricing.Reserve(model, 272001) >= expected);
         Assert.Throws<InvalidDataException>(() => OpenAiPricing.Calculate(model, 100, 80, 30, 1));
@@ -218,32 +222,88 @@ public sealed class OpenAiCognitionTests
         Assert.Throws<InputException>(() => OpenAiCognition.ValidateOptions(options));
     }
 
-    private static OpenAiCognition Client(HttpClient http, Ledger ledger, OpenAiOptions? options = null) =>
-        new(http, options ?? new(), new(), ledger, TimeProvider.System, () => "test-key");
+    private static OpenAiCognition Client(HttpClient http, Ledger ledger, OpenAiOptions? options = null)
+    {
+        return new OpenAiCognition(
+            http, options ?? new OpenAiOptions(), new EngineOptions(), ledger,
+            TimeProvider.System, () => "test-key");
+    }
 
-    private static MemoryRecord Memory(string id, int depth = 0) => new(id, depth, "A contextual observation.",
-        depth == 0 ? "source_" + id : null, [], [], DateTimeOffset.UtcNow, 0, null, "test", 1, 1);
+    private static MemoryRecord Memory(string id, int depth = 0)
+    {
+        string? sourceId = null;
+        if (depth == 0)
+        {
+            sourceId = "source_" + id;
+        }
+
+        return new MemoryRecord(
+            id, depth, "A contextual observation.", sourceId,
+            [], [], DateTimeOffset.UtcNow, 0, null, "test", 1, 1);
+    }
 
     private static HttpResponseMessage Response(string text, string status = "completed", bool refusal = false,
         long input = 100, long cached = 0, long writes = 0, long output = 20, string model = "gpt-5.6-terra")
     {
-        var block = refusal ? new Dictionary<string, object> { ["type"] = "refusal", ["refusal"] = text }
-            : new Dictionary<string, object> { ["type"] = "output_text", ["text"] = text };
-        return JsonResponse(JsonSerializer.Serialize(new
+        Dictionary<string, object> block;
+        if (refusal)
         {
-            status, model, output = new[] { new { type = "message", role = "assistant", content = new[] { block } } },
-            usage = new { input_tokens = input, output_tokens = output, input_tokens_details = new { cached_tokens = cached, cache_write_tokens = writes } }
-        }));
+            block = new Dictionary<string, object>
+            {
+                ["type"] = "refusal",
+                ["refusal"] = text
+            };
+        }
+        else
+        {
+            block = new Dictionary<string, object>
+            {
+                ["type"] = "output_text",
+                ["text"] = text
+            };
+        }
+
+        var response = new
+        {
+            status,
+            model,
+            output = new[]
+            {
+                new
+                {
+                    type = "message",
+                    role = "assistant",
+                    content = new[] { block }
+                }
+            },
+            usage = new
+            {
+                input_tokens = input,
+                output_tokens = output,
+                input_tokens_details = new
+                {
+                    cached_tokens = cached,
+                    cache_write_tokens = writes
+                }
+            }
+        };
+        return JsonResponse(JsonSerializer.Serialize(response));
     }
 
-    private static HttpResponseMessage JsonResponse(string body) => new(HttpStatusCode.OK)
+    private static HttpResponseMessage JsonResponse(string body)
     {
-        Content = new StringContent(body, Encoding.UTF8, "application/json")
-    };
+        return new HttpResponseMessage(HttpStatusCode.OK)
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json")
+        };
+    }
 
     private sealed class Handler(Func<HttpRequestMessage, Task<HttpResponseMessage>> respond) : HttpMessageHandler
     {
-        public int CallCount { get; private set; }
+        public int CallCount
+        {
+            get; private set;
+        }
         protected override Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
         {
             CallCount++;
@@ -253,16 +313,25 @@ public sealed class OpenAiCognitionTests
 
     private sealed class Ledger : IUsageLedger
     {
-        public bool RejectReservation { get; init; }
+        public bool RejectReservation
+        {
+            get; init;
+        }
         public List<UsageReservation> Reservations { get; } = [];
         public List<(string Id, ApiUsage Usage)> Completed { get; } = [];
         public UsageReservation ReserveUsage(long? runId, string model, string operation, decimal maximumUsd, DateTimeOffset now)
         {
-            if (RejectReservation) throw new BudgetExceededException("No remaining budget.");
+            if (RejectReservation)
+            {
+                throw new BudgetExceededException("No remaining budget.");
+            }
             var reservation = new UsageReservation(Guid.NewGuid().ToString("N"), runId, model, operation, maximumUsd);
             Reservations.Add(reservation);
             return reservation;
         }
-        public void CompleteUsage(string reservationId, ApiUsage usage, DateTimeOffset now) => Completed.Add((reservationId, usage));
+        public void CompleteUsage(string reservationId, ApiUsage usage, DateTimeOffset now)
+        {
+            Completed.Add((reservationId, usage));
+        }
     }
 }

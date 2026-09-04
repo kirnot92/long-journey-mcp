@@ -13,7 +13,9 @@ public sealed class MemoryTools(MemoryEngine engine, ILogger<MemoryTools> logger
     public Task<RememberResult> RememberAsync(
         [Description("The unmodified text of one observation to remember.")] string raw,
         CancellationToken cancellationToken)
-        => InvokeAsync(() => engine.RememberAsync(raw, cancellationToken));
+    {
+        return InvokeToolAsync(() => engine.RememberAsync(raw, cancellationToken));
+    }
 
     [McpServerTool(Name = "recall", UseStructuredContent = true, Destructive = false, OpenWorld = true)]
     [Description("Retrieve relevant memories from the shared corpus. Records recall time without reinforcing truth, confidence, or ranking. Relations are outgoing only.")]
@@ -21,18 +23,31 @@ public sealed class MemoryTools(MemoryEngine engine, ILogger<MemoryTools> logger
         [Description("What to search for in memory.")] string query,
         [Description("Optional context for selecting relevant memories.")] string? context = null,
         CancellationToken cancellationToken = default)
-        => InvokeAsync(() => engine.RecallAsync(query, context, cancellationToken));
+    {
+        return InvokeToolAsync(() => engine.RecallAsync(query, context, cancellationToken));
+    }
 
     [McpServerTool(Name = "trace", UseStructuredContent = true, ReadOnly = true, OpenWorld = false)]
     [Description("Follow a memory's immutable derived_from parents down to original raw Sources. Does not traverse reverse positive or negative relations.")]
     public Task<TraceResult> TraceAsync([Description("The exact memory ID to trace.")] string memory_id)
-        => InvokeAsync(() => Task.FromResult(engine.Trace(memory_id)));
-
-    private async Task<T> InvokeAsync<T>(Func<Task<T>> action)
     {
-        try { return await action(); }
-        catch (OperationCanceledException) { throw; }
-        catch (InputException exception) { throw new McpException(exception.Message); }
+        return InvokeToolAsync(() => Task.FromResult(engine.Trace(memory_id)));
+    }
+
+    private async Task<T> InvokeToolAsync<T>(Func<Task<T>> action)
+    {
+        try
+        {
+            return await action();
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (InputException exception)
+        {
+            throw new McpException(exception.Message);
+        }
         catch (Exception exception)
         {
             // Do not log exception text or attach it to the protocol error: it may contain provider data.

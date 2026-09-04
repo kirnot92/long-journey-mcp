@@ -5,15 +5,16 @@ namespace LongJourney.Server;
 /// <summary>A process lifetime OS lock, acquired before SQLite/source recovery.</summary>
 public sealed class CorpusLease : IDisposable
 {
-    private readonly FileStream stream;
+    private readonly FileStream _lockStream;
 
     public CorpusLease(EngineOptions options)
     {
         Directory.CreateDirectory(options.DataDirectory);
+        var lockPath = Path.Combine(options.DataDirectory, ".server.lock");
         try
         {
-            stream = new FileStream(Path.Combine(options.DataDirectory, ".server.lock"),
-                FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
+            _lockStream = new FileStream(
+                lockPath, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
         }
         catch (IOException)
         {
@@ -21,5 +22,8 @@ public sealed class CorpusLease : IDisposable
         }
     }
 
-    public void Dispose() => stream.Dispose();
+    public void Dispose()
+    {
+        _lockStream.Dispose();
+    }
 }

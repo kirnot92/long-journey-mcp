@@ -1,5 +1,4 @@
 using System.Net.Http.Headers;
-using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using LongJourney.Core;
@@ -47,8 +46,10 @@ public sealed class OpenAiCognition : ICognition
         string raw, CallContext context, CancellationToken cancellationToken)
     {
         CheckText(raw, _engine.MaxRawCharacters, "raw");
-        var schema = ProposalSchema.Object(("observations", ProposalSchema.Array(
-            ProposalSchema.Object(("content", ProposalSchema.Text(_engine.MaxMemoryCharacters))), _engine.MaxObservations)));
+        var observationSchema = ProposalSchema.Object(
+            ("content", ProposalSchema.Text(_engine.MaxMemoryCharacters)));
+        var observationsSchema = ProposalSchema.Array(observationSchema, _engine.MaxObservations);
+        var schema = ProposalSchema.Object(("observations", observationsSchema));
         var prompt = $"""
             Select independent direct observations worth remembering from the raw source, with minimal normalization.
             Do not generalize from this single experience or infer a person's enduring preferences.
@@ -56,14 +57,21 @@ public sealed class OpenAiCognition : ICognition
             Produce at most {_engine.MaxObservations} observations, each at most {_engine.MaxMemoryCharacters} characters.
             This is an observation-sized input. Do not force an observation when nothing warrants remembering.
             """;
-        using var result = await RespondAsync(CognitionRole.Remember, "remember", prompt, new { raw }, schema, context, cancellationToken);
+        using var result = await RespondAsync(CognitionRole.Remember, "remember", prompt, new
+        {
+            raw
+        }, schema, context, cancellationToken);
         ProposalSchema.RequireObject(result.RootElement, "observations");
-        var observations = ProposalSchema.ReadArray(result.RootElement, "observations", _engine.MaxObservations).Select(item =>
+
+        var observationItems = ProposalSchema.ReadArray(result.RootElement, "observations", _engine.MaxObservations);
+        var observations = new List<ObservationProposal>(observationItems.Length);
+        foreach (var item in observationItems)
         {
             ProposalSchema.RequireObject(item, "content");
-            return new ObservationProposal(ProposalSchema.ReadText(item.GetProperty("content"), _engine.MaxMemoryCharacters));
-        }).ToArray();
-        return new(observations, result.Model);
+            var content = ProposalSchema.ReadText(item.GetProperty("content"), _engine.MaxMemoryCharacters);
+            observations.Add(new ObservationProposal(content));
+        }
+        return new CognitiveResult<IReadOnlyList<ObservationProposal>>(observations.ToArray(), result.Model);
     }
 
     public async Task<CognitiveResult<IReadOnlyList<string>>> SelectAsync(string query, string? context,
@@ -71,11 +79,22 @@ public sealed class OpenAiCognition : ICognition
     {
         CheckText(query, _engine.MaxRawCharacters, "query");
         if (context is not null && context.Length > _engine.MaxRawCharacters)
+        {
             throw new InputException("Recall context exceeds the configured input bound.");
+        }
         CheckMemories(candidates, _engine.SearchCandidates);
-        if (candidates.Count == 0) return new(Array.Empty<string>(), _options.Recall.Model);
-        var ids = candidates.Select(x => x.Id).ToHashSet(StringComparer.Ordinal);
-        var schema = ProposalSchema.Object(("memory_ids", ProposalSchema.Array(ProposalSchema.Text(128), _engine.RecallLimit)));
+        if (candidates.Count == 0)
+        {
+            return new CognitiveResult<IReadOnlyList<string>>(Array.Empty<string>(), _options.Recall.Model);
+        }
+
+        var candidateIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var candidate in candidates)
+        {
+            candidateIds.Add(candidate.Id);
+        }
+        var selectedIdsSchema = ProposalSchema.Array(ProposalSchema.Text(128), _engine.RecallLimit);
+        var schema = ProposalSchema.Object(("memory_ids", selectedIdsSchema));
         var prompt = $"""
             Select memories useful to the present query and context, in descending contextual usefulness.
             Select only supplied candidate IDs, without duplicates, up to {_engine.RecallLimit} IDs.
@@ -84,13 +103,29 @@ public sealed class OpenAiCognition : ICognition
             Do not answer the query; only select memories. Return no IDs if none are useful.
             """;
         using var result = await RespondAsync(CognitionRole.Recall, "recall", prompt,
-            new { query, context, candidates = PromptMemories(candidates) }, schema, call, cancellationToken);
+            new
+            {
+                query,
+                context,
+                candidates = PromptMemories(candidates)
+            }, schema, call, cancellationToken);
         ProposalSchema.RequireObject(result.RootElement, "memory_ids");
-        var selected = ProposalSchema.ReadArray(result.RootElement, "memory_ids", _engine.RecallLimit)
-            .Select(x => ProposalSchema.ReadText(x, 128)).ToArray();
-        if (selected.Distinct(StringComparer.Ordinal).Count() != selected.Length || selected.Any(x => !ids.Contains(x)))
-            throw new InvalidDataException("Recall selection contains duplicate or unknown memory IDs.");
-        return new(selected, result.Model);
+
+        var selectedItems = ProposalSchema.ReadArray(result.RootElement, "memory_ids", _engine.RecallLimit);
+        var selectedIds = new string[selectedItems.Length];
+        for (var index = 0; index < selectedItems.Length; index++)
+        {
+            selectedIds[index] = ProposalSchema.ReadText(selectedItems[index], 128);
+        }
+        var seenIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var selectedId in selectedIds)
+        {
+            if (!seenIds.Add(selectedId) || !candidateIds.Contains(selectedId))
+            {
+                throw new InvalidDataException("Recall selection contains duplicate or unknown memory IDs.");
+            }
+        }
+        return new CognitiveResult<IReadOnlyList<string>>(selectedIds, result.Model);
     }
 
     public async Task<CognitiveResult<IReadOnlyList<RelationProposal>>> AssimilateAsync(MemoryRecord observation,
@@ -98,12 +133,31 @@ public sealed class OpenAiCognition : ICognition
     {
         CheckMemories([observation], 1);
         CheckMemories(candidates, Math.Max(_engine.SearchCandidates, _engine.MeditationGraphLimit));
-        if (candidates.Count == 0) return new(Array.Empty<RelationProposal>(), _options.Dream.Model);
-        var owners = candidates.Select(x => x.Id).Where(x => x != observation.Id).ToHashSet(StringComparer.Ordinal);
-        var kindSchema = new JsonObject { ["type"] = "string", ["enum"] = new JsonArray("positive", "negative") };
-        var schema = ProposalSchema.Object(("relations", ProposalSchema.Array(ProposalSchema.Object(
-            ("memory_id", ProposalSchema.Text(128)), ("related_memory_id", ProposalSchema.Text(128)),
-            ("kind", kindSchema)), checked(candidates.Count * 2))));
+        if (candidates.Count == 0)
+        {
+            return new CognitiveResult<IReadOnlyList<RelationProposal>>(Array.Empty<RelationProposal>(), _options.Dream.Model);
+        }
+
+        var candidateOwnerIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var candidate in candidates)
+        {
+            if (candidate.Id != observation.Id)
+            {
+                candidateOwnerIds.Add(candidate.Id);
+            }
+        }
+        var kindSchema = new JsonObject
+        {
+            ["type"] = "string",
+            ["enum"] = new JsonArray("positive", "negative")
+        };
+        var relationSchema = ProposalSchema.Object(
+            ("memory_id", ProposalSchema.Text(128)),
+            ("related_memory_id", ProposalSchema.Text(128)),
+            ("kind", kindSchema));
+        var maximumRelations = checked(candidates.Count * 2);
+        var relationsSchema = ProposalSchema.Array(relationSchema, maximumRelations);
+        var schema = ProposalSchema.Object(("relations", relationsSchema));
         var prompt = """
             Evaluate whether the focal observation provides supporting or contradicting evidence for each existing candidate.
             Emit a relation only for an actual support, counterexample, exception, contradiction, or tension.
@@ -114,10 +168,17 @@ public sealed class OpenAiCognition : ICognition
             Do not modify any content or provenance. Do not repeat an already-present identical outgoing relation.
             """;
         using var result = await RespondAsync(CognitionRole.Dream, "assimilation", prompt,
-            new { observation = PromptMemories([observation]).Single(), candidates = PromptMemories(candidates, [observation.Id]) },
+            new
+            {
+                observation = PromptMemories([observation])[0],
+                candidates = PromptMemories(candidates, [observation.Id])
+            },
             schema, context, cancellationToken);
         ProposalSchema.RequireObject(result.RootElement, "relations");
-        var relations = ProposalSchema.ReadArray(result.RootElement, "relations", checked(candidates.Count * 2)).Select(item =>
+
+        var relationItems = ProposalSchema.ReadArray(result.RootElement, "relations", maximumRelations);
+        var relations = new List<RelationProposal>(relationItems.Length);
+        foreach (var item in relationItems)
         {
             ProposalSchema.RequireObject(item, "memory_id", "related_memory_id", "kind");
             var owner = ProposalSchema.ReadText(item.GetProperty("memory_id"), 128);
@@ -128,13 +189,21 @@ public sealed class OpenAiCognition : ICognition
                 "negative" => RelationKind.Negative,
                 _ => throw new InvalidDataException("Unknown relation kind.")
             };
-            if (!owners.Contains(owner) || target != observation.Id)
+            if (!candidateOwnerIds.Contains(owner) || target != observation.Id)
+            {
                 throw new InvalidDataException("Assimilation proposed an unknown or reversed relation.");
-            return new RelationProposal(owner, target, kind);
-        }).ToArray();
-        if (relations.Distinct().Count() != relations.Length)
-            throw new InvalidDataException("Assimilation returned duplicate relations.");
-        return new(relations, result.Model);
+            }
+            relations.Add(new RelationProposal(owner, target, kind));
+        }
+        var seenRelations = new HashSet<RelationProposal>();
+        foreach (var relation in relations)
+        {
+            if (!seenRelations.Add(relation))
+            {
+                throw new InvalidDataException("Assimilation returned duplicate relations.");
+            }
+        }
+        return new CognitiveResult<IReadOnlyList<RelationProposal>>(relations.ToArray(), result.Model);
     }
 
     public async Task<CognitiveResult<IReadOnlyList<AbstractionProposal>>> AbstractAsync(
@@ -142,15 +211,34 @@ public sealed class OpenAiCognition : ICognition
         CognitionRole role, CallContext context, CancellationToken cancellationToken)
     {
         if (role is not (CognitionRole.Dream or CognitionRole.Meditation))
+        {
             throw new InputException("Only Dream and Meditation may propose abstractions.");
+        }
         CheckMemories(neighborhood, _engine.MeditationGraphLimit);
-        if (sources.Count > _engine.MeditationSourceLimit) throw new InputException("Too many source artifacts in prompt.");
-        foreach (var source in sources) CheckText(source.Raw, _engine.MaxRawCharacters, "source");
-        if (neighborhood.Count < _engine.RootBase) return new(Array.Empty<AbstractionProposal>(), _options.For(role).Model);
-        var ids = neighborhood.Select(x => x.Id).ToHashSet(StringComparer.Ordinal);
-        var schema = ProposalSchema.Object(("abstractions", ProposalSchema.Array(ProposalSchema.Object(
+        if (sources.Count > _engine.MeditationSourceLimit)
+        {
+            throw new InputException("Too many source artifacts in prompt.");
+        }
+        foreach (var source in sources)
+        {
+            CheckText(source.Raw, _engine.MaxRawCharacters, "source");
+        }
+        if (neighborhood.Count < _engine.RootBase)
+        {
+            return new CognitiveResult<IReadOnlyList<AbstractionProposal>>(Array.Empty<AbstractionProposal>(), _options.For(role).Model);
+        }
+
+        var candidateParentIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var memory in neighborhood)
+        {
+            candidateParentIds.Add(memory.Id);
+        }
+        var parentIdsSchema = ProposalSchema.Array(ProposalSchema.Text(128), neighborhood.Count);
+        var abstractionSchema = ProposalSchema.Object(
             ("content", ProposalSchema.Text(_engine.MaxMemoryCharacters)),
-            ("derived_from", ProposalSchema.Array(ProposalSchema.Text(128), neighborhood.Count))), _engine.NeighborhoodSize)));
+            ("derived_from", parentIdsSchema));
+        var abstractionsSchema = ProposalSchema.Array(abstractionSchema, _engine.NeighborhoodSize);
+        var schema = ProposalSchema.Object(("abstractions", abstractionsSchema));
         var prompt = $"""
             Find tentative, useful patterns supported by a subset of the provided memories.
             Produce 0..{_engine.NeighborhoodSize} abstraction proposals, content at most {_engine.MaxMemoryCharacters} characters.
@@ -163,25 +251,50 @@ public sealed class OpenAiCognition : ICognition
             Multiple overlapping parent subsets are allowed; no forced hard clustering or truth/confidence scores.
             """;
         if (role == CognitionRole.Meditation)
+        {
             prompt += "\nAnalyze wider patterns, unresolved contradictions, shared conditions, and alternative explanations. " +
                       "Use supplied raw sources to check interpretations; formulate causal ideas only as provisional hypotheses.";
+        }
         else
+        {
             prompt += "\nConsolidate this local neighborhood without recursively using any proposals created during this response.";
+        }
         using var result = await RespondAsync(role, role == CognitionRole.Dream ? "consolidation" : "meditation", prompt,
-            new { memories = PromptMemories(neighborhood), sources = sources.Select(x => new { source_id = x.Source.Id, raw = x.Raw }) },
+            new
+            {
+                memories = PromptMemories(neighborhood),
+                sources = PromptSources(sources)
+            },
             schema, context, cancellationToken);
         ProposalSchema.RequireObject(result.RootElement, "abstractions");
-        var proposals = ProposalSchema.ReadArray(result.RootElement, "abstractions", _engine.NeighborhoodSize).Select(item =>
+
+        var abstractionItems = ProposalSchema.ReadArray(result.RootElement, "abstractions", _engine.NeighborhoodSize);
+        var proposals = new List<AbstractionProposal>(abstractionItems.Length);
+        foreach (var item in abstractionItems)
         {
             ProposalSchema.RequireObject(item, "content", "derived_from");
             var content = ProposalSchema.ReadText(item.GetProperty("content"), _engine.MaxMemoryCharacters);
-            var parents = ProposalSchema.ReadArray(item, "derived_from", neighborhood.Count)
-                .Select(x => ProposalSchema.ReadText(x, 128)).ToArray();
-            if (parents.Length == 0 || parents.Distinct(StringComparer.Ordinal).Count() != parents.Length || parents.Any(x => !ids.Contains(x)))
+            var parentItems = ProposalSchema.ReadArray(item, "derived_from", neighborhood.Count);
+            var parentIds = new string[parentItems.Length];
+            for (var index = 0; index < parentItems.Length; index++)
+            {
+                parentIds[index] = ProposalSchema.ReadText(parentItems[index], 128);
+            }
+            if (parentIds.Length == 0)
+            {
                 throw new InvalidDataException("Abstraction has empty, duplicate, or unknown parent IDs.");
-            return new AbstractionProposal(content, parents);
-        }).ToArray();
-        return new(proposals, result.Model);
+            }
+            var seenParentIds = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var parentId in parentIds)
+            {
+                if (!seenParentIds.Add(parentId) || !candidateParentIds.Contains(parentId))
+                {
+                    throw new InvalidDataException("Abstraction has empty, duplicate, or unknown parent IDs.");
+                }
+            }
+            proposals.Add(new AbstractionProposal(content, parentIds));
+        }
+        return new CognitiveResult<IReadOnlyList<AbstractionProposal>>(proposals.ToArray(), result.Model);
     }
 
     public async Task<EmbeddingVector> EmbedAsync(string text, CallContext context, CancellationToken cancellationToken)
@@ -189,109 +302,219 @@ public sealed class OpenAiCognition : ICognition
         CheckText(text, Math.Max(_engine.MaxRawCharacters, _engine.MaxMemoryCharacters), "embedding input");
         var payload = JsonSerializer.SerializeToUtf8Bytes(new
         {
-            model = _options.EmbeddingModel, input = text, dimensions = _options.EmbeddingDimensions, encoding_format = "float"
+            model = _options.EmbeddingModel,
+            input = text,
+            dimensions = _options.EmbeddingDimensions,
+            encoding_format = "float"
         });
         using var request = CreateRequest("embeddings", payload);
         cancellationToken.ThrowIfCancellationRequested();
+
         var reservation = _ledger.ReserveUsage(context.RunId, _options.EmbeddingModel, "embedding",
             MaximumInputTokens(payload) * _options.EmbeddingInputUsdPerMillion / 1_000_000m, _time.GetUtcNow());
         using var response = await SendAsync(request, cancellationToken);
         using var document = await ReadDocumentAsync(response, cancellationToken);
-        var root = document.RootElement;
-        var usage = root.GetProperty("usage");
-        var tokens = RequiredTokens(usage, "prompt_tokens");
-        _ledger.CompleteUsage(reservation.Id, new ApiUsage(tokens, 0, 0,
-            tokens * _options.EmbeddingInputUsdPerMillion / 1_000_000m), _time.GetUtcNow());
-        if (!root.TryGetProperty("model", out var model) || model.GetString() != _options.EmbeddingModel)
-            throw new InvalidDataException("Embedding response uses a different model.");
-        if (!root.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array || data.GetArrayLength() != 1 ||
-            !data[0].TryGetProperty("index", out var index) || index.GetInt32() != 0 ||
-            !data[0].TryGetProperty("embedding", out var vector) || vector.ValueKind != JsonValueKind.Array ||
-            vector.GetArrayLength() != _options.EmbeddingDimensions)
-            throw new InvalidDataException("OpenAI returned an invalid embedding shape.");
-        var values = vector.EnumerateArray().Select(x => x.GetSingle()).ToArray();
-        if (values.Any(x => !float.IsFinite(x)) || !values.Any(x => x != 0))
-            throw new InvalidDataException("OpenAI returned an invalid embedding vector.");
-        return new EmbeddingVector(EmbeddingSpace, values);
+
+        // Known usage is charged even when the returned vector fails validation.
+        AccountEmbeddingUsage(document.RootElement, reservation);
+        return ParseEmbeddingVector(document.RootElement);
     }
 
     private async Task<ParsedResponse> RespondAsync(CognitionRole role, string operation, string prompt,
         object data, JsonObject schema, CallContext context, CancellationToken cancellationToken)
     {
         var model = _options.For(role);
-        var body = new JsonObject
-        {
-            ["model"] = model.Model, ["store"] = false, ["max_output_tokens"] = model.MaxOutputTokens,
-            ["service_tier"] = "default",
-            ["instructions"] = Principles + "\n" + prompt,
-            ["input"] = new JsonArray(new JsonObject
-            {
-                ["role"] = "user", ["content"] = JsonSerializer.Serialize(data, JsonDefaults.Options)
-            }),
-            ["text"] = new JsonObject
-            {
-                ["format"] = new JsonObject
-                {
-                    ["type"] = "json_schema", ["name"] = operation, ["strict"] = true, ["schema"] = schema
-                }
-            }
-        };
-        if (!string.IsNullOrWhiteSpace(model.ReasoningEffort)) body["reasoning"] = new JsonObject { ["effort"] = model.ReasoningEffort };
-        // GPT-5.6 supports explicit mode with no breakpoints: no cache writes for changing single-turn payloads.
-        if (model.Model.StartsWith("gpt-5.6", StringComparison.Ordinal))
-            body["prompt_cache_options"] = new JsonObject { ["mode"] = "explicit" };
-        var payload = JsonSerializer.SerializeToUtf8Bytes(body);
+        var payload = BuildResponsePayload(model, operation, prompt, data, schema);
         using var request = CreateRequest("responses", payload);
         cancellationToken.ThrowIfCancellationRequested();
+
         var reservation = _ledger.ReserveUsage(context.RunId, model.Model, operation,
             OpenAiPricing.Reserve(model, MaximumInputTokens(payload)), _time.GetUtcNow());
         using var response = await SendAsync(request, cancellationToken);
         using var document = await ReadDocumentAsync(response, cancellationToken);
-        var root = document.RootElement;
-        var usage = root.GetProperty("usage");
-        var input = RequiredTokens(usage, "input_tokens");
-        var output = RequiredTokens(usage, "output_tokens");
-        var cached = 0L;
-        var writes = 0L;
+
+        // Refusal, incomplete output and invalid proposals still incur known usage.
+        // Failures before accounting retain the reservation because usage is unknown.
+        AccountResponseUsage(document.RootElement, model, reservation);
+        return ParseStructuredResponse(document.RootElement);
+    }
+
+    private static byte[] BuildResponsePayload(ModelOptions model, string operation, string prompt,
+        object data, JsonObject schema)
+    {
+        var userMessage = new JsonObject
+        {
+            ["role"] = "user",
+            ["content"] = JsonSerializer.Serialize(data, JsonDefaults.Options)
+        };
+        var structuredFormat = new JsonObject
+        {
+            ["type"] = "json_schema",
+            ["name"] = operation,
+            ["strict"] = true,
+            ["schema"] = schema
+        };
+        var body = new JsonObject
+        {
+            ["model"] = model.Model,
+            ["store"] = false,
+            ["max_output_tokens"] = model.MaxOutputTokens,
+            ["service_tier"] = "default",
+            ["instructions"] = Principles + "\n" + prompt,
+            ["input"] = new JsonArray(userMessage),
+            ["text"] = new JsonObject
+            {
+                ["format"] = structuredFormat
+            }
+        };
+        if (!string.IsNullOrWhiteSpace(model.ReasoningEffort))
+        {
+            body["reasoning"] = new JsonObject
+            {
+                ["effort"] = model.ReasoningEffort
+            };
+        }
+        // GPT-5.6 supports explicit mode with no breakpoints: no cache writes for changing single-turn payloads.
+        if (model.Model.StartsWith("gpt-5.6", StringComparison.Ordinal))
+        {
+            body["prompt_cache_options"] = new JsonObject
+            {
+                ["mode"] = "explicit"
+            };
+        }
+        return JsonSerializer.SerializeToUtf8Bytes(body);
+    }
+
+    private void AccountResponseUsage(JsonElement response, ModelOptions model, UsageReservation reservation)
+    {
+        var usage = response.GetProperty("usage");
+        var inputTokens = RequiredTokens(usage, "input_tokens");
+        var outputTokens = RequiredTokens(usage, "output_tokens");
+        var cachedTokens = 0L;
+        var cacheWriteTokens = 0L;
         if (usage.TryGetProperty("input_tokens_details", out var details) && details.ValueKind == JsonValueKind.Object)
         {
-            cached = OptionalTokens(details, "cached_tokens");
-            writes = OptionalTokens(details, "cache_write_tokens");
+            cachedTokens = OptionalTokens(details, "cached_tokens");
+            cacheWriteTokens = OptionalTokens(details, "cache_write_tokens");
         }
-        // Account before interpreting refusal, incomplete output, or invalid structured proposals.
-        _ledger.CompleteUsage(reservation.Id, new ApiUsage(input, cached, output,
-            OpenAiPricing.Calculate(model, input, cached, writes, output), writes), _time.GetUtcNow());
-        if (!root.TryGetProperty("status", out var status) || status.GetString() != "completed")
+        var costUsd = OpenAiPricing.Calculate(model, inputTokens, cachedTokens, cacheWriteTokens, outputTokens);
+        var accountedUsage = new ApiUsage(inputTokens, cachedTokens, outputTokens, costUsd, cacheWriteTokens);
+        _ledger.CompleteUsage(reservation.Id, accountedUsage, _time.GetUtcNow());
+    }
+
+    private void AccountEmbeddingUsage(JsonElement response, UsageReservation reservation)
+    {
+        var usage = response.GetProperty("usage");
+        var tokens = RequiredTokens(usage, "prompt_tokens");
+        var costUsd = tokens * _options.EmbeddingInputUsdPerMillion / 1_000_000m;
+        var accountedUsage = new ApiUsage(tokens, 0, 0, costUsd);
+        _ledger.CompleteUsage(reservation.Id, accountedUsage, _time.GetUtcNow());
+    }
+
+    private static ParsedResponse ParseStructuredResponse(JsonElement response)
+    {
+        if (!response.TryGetProperty("status", out var status) || status.GetString() != "completed")
+        {
             throw new InvalidDataException("OpenAI response did not complete; no proposal was applied.");
-        if (!root.TryGetProperty("model", out var responseModel) || responseModel.ValueKind != JsonValueKind.String ||
+        }
+        if (!response.TryGetProperty("model", out var responseModel) || responseModel.ValueKind != JsonValueKind.String ||
             string.IsNullOrWhiteSpace(responseModel.GetString()))
+        {
             throw new InvalidDataException("OpenAI response has no model provenance.");
-        if (!root.TryGetProperty("output", out var items) || items.ValueKind != JsonValueKind.Array)
+        }
+        if (!response.TryGetProperty("output", out var items) || items.ValueKind != JsonValueKind.Array)
+        {
             throw new InvalidDataException("OpenAI response has no output.");
+        }
+
         var texts = new List<string>();
         foreach (var item in items.EnumerateArray())
         {
             if (item.TryGetProperty("type", out var itemType) && itemType.GetString() == "refusal")
+            {
                 throw new InvalidDataException("OpenAI refused this cognitive operation.");
-            if (!item.TryGetProperty("content", out var blocks) || blocks.ValueKind != JsonValueKind.Array) continue;
+            }
+            if (!item.TryGetProperty("content", out var blocks) || blocks.ValueKind != JsonValueKind.Array)
+            {
+                continue;
+            }
             foreach (var block in blocks.EnumerateArray())
             {
-                if (!block.TryGetProperty("type", out var type)) continue;
-                if (type.GetString() == "refusal") throw new InvalidDataException("OpenAI refused this cognitive operation.");
+                if (!block.TryGetProperty("type", out var type))
+                {
+                    continue;
+                }
+                if (type.GetString() == "refusal")
+                {
+                    throw new InvalidDataException("OpenAI refused this cognitive operation.");
+                }
                 if (type.GetString() == "output_text" && block.TryGetProperty("text", out var text) && text.ValueKind == JsonValueKind.String)
+                {
                     texts.Add(text.GetString()!);
+                }
             }
         }
         if (texts.Count != 1 || string.IsNullOrWhiteSpace(texts[0]))
+        {
             throw new InvalidDataException("OpenAI response must contain one structured result.");
-        try { return new ParsedResponse(JsonDocument.Parse(texts[0]), responseModel.GetString()!); }
-        catch (JsonException) { throw new InvalidDataException("OpenAI returned malformed proposal JSON."); }
+        }
+        try
+        {
+            return new ParsedResponse(JsonDocument.Parse(texts[0]), responseModel.GetString()!);
+        }
+        catch (JsonException)
+        {
+            throw new InvalidDataException("OpenAI returned malformed proposal JSON.");
+        }
+    }
+
+    private EmbeddingVector ParseEmbeddingVector(JsonElement response)
+    {
+        if (!response.TryGetProperty("model", out var model) || model.GetString() != _options.EmbeddingModel)
+        {
+            throw new InvalidDataException("Embedding response uses a different model.");
+        }
+        if (!response.TryGetProperty("data", out var data) || data.ValueKind != JsonValueKind.Array || data.GetArrayLength() != 1 ||
+            !data[0].TryGetProperty("index", out var index) || index.GetInt32() != 0 ||
+            !data[0].TryGetProperty("embedding", out var vector) || vector.ValueKind != JsonValueKind.Array ||
+            vector.GetArrayLength() != _options.EmbeddingDimensions)
+        {
+            throw new InvalidDataException("OpenAI returned an invalid embedding shape.");
+        }
+
+        var values = new float[vector.GetArrayLength()];
+        var valueIndex = 0;
+        foreach (var value in vector.EnumerateArray())
+        {
+            values[valueIndex] = value.GetSingle();
+            valueIndex++;
+        }
+        var hasNonzeroValue = false;
+        foreach (var value in values)
+        {
+            if (!float.IsFinite(value))
+            {
+                throw new InvalidDataException("OpenAI returned an invalid embedding vector.");
+            }
+            if (value != 0)
+            {
+                hasNonzeroValue = true;
+            }
+        }
+        if (!hasNonzeroValue)
+        {
+            throw new InvalidDataException("OpenAI returned an invalid embedding vector.");
+        }
+        return new EmbeddingVector(EmbeddingSpace, values);
     }
 
     private HttpRequestMessage CreateRequest(string path, byte[] payload)
     {
         var key = _apiKey();
-        if (string.IsNullOrWhiteSpace(key)) throw new InputException("Set OPENAI_API_KEY before using cognitive operations.");
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            throw new InputException("Set OPENAI_API_KEY before using cognitive operations.");
+        }
         var request = new HttpRequestMessage(HttpMethod.Post, new Uri(_baseUri, path));
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", key);
         request.Content = new ByteArrayContent(payload);
@@ -321,60 +544,151 @@ public sealed class OpenAiCognition : ICognition
             await using var stream = await response.Content.ReadAsStreamAsync(cancellationToken);
             return await JsonDocument.ParseAsync(stream, cancellationToken: cancellationToken);
         }
-        catch (JsonException) { throw new InvalidDataException("OpenAI returned malformed response JSON; usage reservation is retained."); }
+        catch (JsonException)
+        {
+            throw new InvalidDataException("OpenAI returned malformed response JSON; usage reservation is retained.");
+        }
     }
 
-    private static long MaximumInputTokens(byte[] serializedPayload) => checked(serializedPayload.LongLength + 8192L);
+    private static long MaximumInputTokens(byte[] serializedPayload)
+    {
+        return checked(serializedPayload.LongLength + 8192L);
+    }
 
     private static long RequiredTokens(JsonElement usage, string name)
     {
         if (!usage.TryGetProperty(name, out var value) || !value.TryGetInt64(out var tokens) || tokens < 0)
+        {
             throw new InvalidDataException("OpenAI returned missing or invalid token usage; usage reservation is retained.");
+        }
         return tokens;
     }
 
-    private static long OptionalTokens(JsonElement usage, string name) => usage.TryGetProperty(name, out _)
-        ? RequiredTokens(usage, name) : 0;
+    private static long OptionalTokens(JsonElement usage, string name)
+    {
+        if (usage.TryGetProperty(name, out _))
+        {
+            return RequiredTokens(usage, name);
+        }
+        return 0;
+    }
 
     private static void CheckText(string text, int maximum, string field)
     {
         if (string.IsNullOrWhiteSpace(text) || text.Length > maximum)
+        {
             throw new InputException($"{field} must be nonempty and at most {maximum} characters.");
+        }
     }
 
     private void CheckMemories(IReadOnlyList<MemoryRecord> memories, int maximum)
     {
-        if (memories.Count > maximum) throw new InputException("Too many memories in cognitive request.");
+        if (memories.Count > maximum)
+        {
+            throw new InputException("Too many memories in cognitive request.");
+        }
         foreach (var memory in memories)
         {
             CheckText(memory.Id, 128, "memory ID");
             CheckText(memory.Content, _engine.MaxMemoryCharacters, "memory content");
         }
-        if (memories.Select(x => x.Id).Distinct(StringComparer.Ordinal).Count() != memories.Count)
-            throw new InputException("Duplicate memory IDs in cognitive request.");
+        var seenIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var memory in memories)
+        {
+            if (!seenIds.Add(memory.Id))
+            {
+                throw new InputException("Duplicate memory IDs in cognitive request.");
+            }
+        }
     }
 
     private object[] PromptMemories(IReadOnlyList<MemoryRecord> memories, IReadOnlyList<string>? extraIds = null)
     {
-        var visibleIds = memories.Select(x => x.Id).Concat(extraIds ?? []).ToHashSet(StringComparer.Ordinal);
-        return memories.Select(memory =>
+        var visibleIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var memory in memories)
         {
-            var relations = memory.Relations.Where(x => visibleIds.Contains(x.RelatedMemoryId)).Take(_engine.MeditationGraphLimit).ToArray();
-            var parents = memory.DerivedFrom.Take(_engine.MeditationGraphLimit).ToArray();
-            return (object)new
+            visibleIds.Add(memory.Id);
+        }
+        if (extraIds is not null)
+        {
+            foreach (var id in extraIds)
             {
-                memory.Id, memory.Depth, memory.Content, memory.SourceRef, memory.UniqueSourceRootCount,
-                derived_from = parents, omitted_parent_count = memory.DerivedFrom.Count - parents.Length,
-                outgoing_relations = relations.Select(x => new { x.RelatedMemoryId, x.Kind }),
-                omitted_relation_count = memory.Relations.Count - relations.Length
+                visibleIds.Add(id);
+            }
+        }
+
+        var promptMemories = new object[memories.Count];
+        for (var index = 0; index < memories.Count; index++)
+        {
+            promptMemories[index] = PromptMemory(memories[index], visibleIds);
+        }
+        return promptMemories;
+    }
+
+    private object PromptMemory(MemoryRecord memory, HashSet<string> visibleIds)
+    {
+        var outgoingRelations = new List<object>();
+        foreach (var relation in memory.Relations)
+        {
+            // Filter by visible evidence before applying the cap.
+            if (!visibleIds.Contains(relation.RelatedMemoryId))
+            {
+                continue;
+            }
+            if (outgoingRelations.Count == _engine.MeditationGraphLimit)
+            {
+                break;
+            }
+            outgoingRelations.Add(new
+            {
+                relation.RelatedMemoryId,
+                relation.Kind
+            });
+        }
+
+        var parentCount = Math.Min(memory.DerivedFrom.Count, _engine.MeditationGraphLimit);
+        var parents = new string[parentCount];
+        for (var index = 0; index < parentCount; index++)
+        {
+            parents[index] = memory.DerivedFrom[index];
+        }
+        return new
+        {
+            memory.Id,
+            memory.Depth,
+            memory.Content,
+            memory.SourceRef,
+            memory.UniqueSourceRootCount,
+            derived_from = parents,
+            omitted_parent_count = memory.DerivedFrom.Count - parents.Length,
+            outgoing_relations = outgoingRelations.ToArray(),
+            omitted_relation_count = memory.Relations.Count - outgoingRelations.Count
+        };
+    }
+
+    private static object[] PromptSources(IReadOnlyList<SourceArtifact> sources)
+    {
+        var promptSources = new object[sources.Count];
+        for (var index = 0; index < sources.Count; index++)
+        {
+            var source = sources[index];
+            promptSources[index] = new
+            {
+                source_id = source.Source.Id,
+                raw = source.Raw
             };
-        }).ToArray();
+        }
+        return promptSources;
     }
 
     private sealed record ParsedResponse(JsonDocument Document, string Model) : IDisposable
     {
         public JsonElement RootElement => Document.RootElement;
-        public void Dispose() => Document.Dispose();
+
+        public void Dispose()
+        {
+            Document.Dispose();
+        }
     }
 
     public static void ValidateOptions(OpenAiOptions options)
@@ -382,10 +696,14 @@ public sealed class OpenAiCognition : ICognition
         if (!Uri.TryCreate(options.BaseUrl, UriKind.Absolute, out var uri) || uri.Scheme != Uri.UriSchemeHttps ||
             !uri.Host.Equals("api.openai.com", StringComparison.OrdinalIgnoreCase) || uri.Port != 443 ||
             uri.AbsolutePath.TrimEnd('/') != "/v1" || uri.Query.Length != 0 || uri.Fragment.Length != 0 || uri.UserInfo.Length != 0)
+        {
             throw new InputException("OpenAI BaseUrl must be the direct https://api.openai.com/v1/ endpoint.");
+        }
         if (options.TimeoutSeconds < 1 || string.IsNullOrWhiteSpace(options.EmbeddingModel) ||
             options.EmbeddingDimensions < 1 || options.EmbeddingInputUsdPerMillion <= 0)
+        {
             throw new InputException("Invalid OpenAI embedding or timeout configuration.");
+        }
         foreach (var role in Enum.GetValues<CognitionRole>())
         {
             var model = options.For(role);
@@ -393,7 +711,9 @@ public sealed class OpenAiCognition : ICognition
                 model.InputUsdPerMillion <= 0 || model.CachedInputUsdPerMillion < 0 || model.CacheWriteUsdPerMillion < 0 ||
                 model.OutputUsdPerMillion <= 0 || model.LongContextThresholdTokens < 1 ||
                 model.LongContextInputMultiplier < 1 || model.LongContextOutputMultiplier < 1)
+            {
                 throw new InputException($"Invalid OpenAI model/pricing configuration for {role}.");
+            }
         }
     }
 }

@@ -12,19 +12,51 @@ public static class JsonDefaults
     };
 }
 
-public enum RelationKind { Positive, Negative }
-public enum RunKind { Dream, Meditation }
-public enum CognitionRole { Remember, Recall, Dream, Meditation }
+public enum RelationKind
+{
+    Positive,
+    Negative
+}
 
+public enum RunKind
+{
+    Dream,
+    Meditation
+}
+
+public enum CognitionRole
+{
+    Remember,
+    Recall,
+    Dream,
+    Meditation
+}
+
+/// <summary>An outgoing edge; reading it never implies a reverse relation.</summary>
 public sealed record MemoryRelation(string RelatedMemoryId, RelationKind Kind, DateTimeOffset RelatedAt, long Sequence);
+
 public sealed record MemoryRecord(
     string Id, int Depth, string Content, string? SourceRef,
     IReadOnlyList<string> DerivedFrom, IReadOnlyList<MemoryRelation> Relations,
     DateTimeOffset CreatedAt, long DreamRevision, DateTimeOffset? LastRecalledAt,
     string CreatedByModel, int UniqueSourceRootCount, long Sequence)
 {
-    public IReadOnlyList<string> PositiveRelated => Relations.Where(x => x.Kind == RelationKind.Positive).Select(x => x.RelatedMemoryId).ToArray();
-    public IReadOnlyList<string> NegativeRelated => Relations.Where(x => x.Kind == RelationKind.Negative).Select(x => x.RelatedMemoryId).ToArray();
+    public IReadOnlyList<string> PositiveRelated => GetRelatedMemoryIds(RelationKind.Positive);
+    public IReadOnlyList<string> NegativeRelated => GetRelatedMemoryIds(RelationKind.Negative);
+
+    private string[] GetRelatedMemoryIds(RelationKind kind)
+    {
+        var memoryIds = new List<string>();
+        foreach (var relation in Relations)
+        {
+            if (relation.Kind == kind)
+            {
+                memoryIds.Add(relation.RelatedMemoryId);
+            }
+        }
+
+        return memoryIds.ToArray();
+    }
 }
 
 public sealed record SourceRecord(string Id, string ContentHash, string RelativePath, DateTimeOffset CreatedAt, string Status);
@@ -38,9 +70,11 @@ public sealed record RelationProposal(string MemoryId, string RelatedMemoryId, R
 public sealed record AbstractionProposal(string Content, IReadOnlyList<string> DerivedFrom);
 public sealed record CognitiveResult<T>(T Value, string Model);
 public sealed record EmbeddingVector(string Space, float[] Values);
+/// <summary>The run charged for API calls. Carry work may use evidence from a different, older run.</summary>
 public sealed record CallContext(long? RunId = null);
 public sealed record RecallEvent(string MemoryId, DateTimeOffset RecalledAt, long Sequence);
 
+/// <summary>A period and its fixed input sequence limits. Its ID also marks the output generation.</summary>
 public sealed record RunRecord(
     long Id, RunKind Kind, DateTimeOffset PeriodStart, DateTimeOffset PeriodEnd,
     DateTimeOffset StartedAt, long MemoryHighWater, long RelationHighWater, long RecallHighWater,
@@ -48,7 +82,20 @@ public sealed record RunRecord(
 
 public sealed record GraphSnapshot(IReadOnlyList<MemoryRecord> Memories, IReadOnlyList<RecallEvent> RecallEvents)
 {
-    public IReadOnlyDictionary<string, MemoryRecord> ById => Memories.ToDictionary(x => x.Id, StringComparer.Ordinal);
+    // Build an index on demand without changing or caching the evidence snapshot.
+    public IReadOnlyDictionary<string, MemoryRecord> ById
+    {
+        get
+        {
+            var memoriesById = new Dictionary<string, MemoryRecord>(StringComparer.Ordinal);
+            foreach (var memory in Memories)
+            {
+                memoriesById.Add(memory.Id, memory);
+            }
+
+            return memoriesById;
+        }
+    }
 }
 
 public sealed record RunWorkItem(long RunId, string Key, string Phase, string MemoryId, int Ordinal, string Status, string? ProposalJson, string? Model);

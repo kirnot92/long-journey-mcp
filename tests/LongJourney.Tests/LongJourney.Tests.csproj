@@ -12,7 +12,4 @@
     <ProjectReference Include="../../src/LongJourney.Server/LongJourney.Server.csproj" />
   </ItemGroup>
   <ItemGroup><Using Include="Xunit" /></ItemGroup>
-  <ItemGroup>
-    <ProjectReference Include="..\..\src\LongJourney.Benchmarks\LongJourney.Benchmarks.csproj" />
-  </ItemGroup>
 </Project>

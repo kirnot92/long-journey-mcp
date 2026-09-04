@@ -79,8 +79,7 @@ public sealed class OpenAiApiKeySource
 
         // Project launches use their project directory. Recognize only this repository layout.
         var repositoryRoot = Path.GetFullPath(Path.Combine(contentRoot, "..", ".."));
-        if ((File.Exists(Path.Combine(contentRoot, "LongJourney.Server.csproj")) ||
-            File.Exists(Path.Combine(contentRoot, "LongJourney.Benchmarks.csproj"))) &&
+        if (File.Exists(Path.Combine(contentRoot, "LongJourney.Server.csproj")) &&
             File.Exists(Path.Combine(repositoryRoot, "LongJourney.slnx")))
         {
             return Path.Combine(repositoryRoot, "key.txt");

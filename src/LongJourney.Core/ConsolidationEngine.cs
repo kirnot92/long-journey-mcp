@@ -175,12 +175,9 @@ public sealed class ConsolidationEngine(
 
         // Complete every new observation's assimilation before processing abstractions.
         var work = new List<WorkSeed>();
-        if (options.DreamAssimilationEnabled)
+        foreach (var observation in createdObservations)
         {
-            foreach (var observation in createdObservations)
-            {
-                work.Add(new WorkSeed($"assimilate:{observation.Id}", "assimilation", observation.Id, work.Count));
-            }
+            work.Add(new WorkSeed($"assimilate:{observation.Id}", "assimilation", observation.Id, work.Count));
         }
 
         foreach (var seed in consolidationSeeds)

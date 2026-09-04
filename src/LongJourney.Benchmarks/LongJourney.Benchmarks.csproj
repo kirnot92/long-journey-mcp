@@ -1,9 +1,0 @@
-<Project Sdk="Microsoft.NET.Sdk">
-  <PropertyGroup>
-    <OutputType>Exe</OutputType>
-  </PropertyGroup>
-  <ItemGroup>
-    <ProjectReference Include="../LongJourney.Core/LongJourney.Core.csproj" />
-    <ProjectReference Include="../LongJourney.OpenAI/LongJourney.OpenAI.csproj" />
-  </ItemGroup>
-</Project>

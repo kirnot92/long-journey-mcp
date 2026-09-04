@@ -9,9 +9,9 @@ namespace LongJourney.Server;
 public sealed class MemoryTools(MemoryEngine engine, ILogger<MemoryTools> logger)
 {
     [McpServerTool(Name = "remember", UseStructuredContent = true, Destructive = false, OpenWorld = true)]
-    [Description("Preserve a raw source with the context needed to understand it and extract observations into the shared memory corpus. Exact duplicate raw input is not stored again. Created time is assigned internally; no speaker or project metadata is required.")]
+    [Description("Remember one coherent experience the caller agent considers worth remembering, including the context needed to understand it. Exact duplicate raw input is not stored again. Created time is assigned internally; no speaker or project metadata is required.")]
     public Task<RememberResult> RememberAsync(
-        [Description("The unmodified source text. For a conversation, include the complete relevant dialogue with its original turn order and roles, not isolated utterances.")] string raw,
+        [Description("One coherent experience selected by the caller agent, with the context needed to understand it.")] string raw,
         CancellationToken cancellationToken)
     {
         return InvokeToolAsync(() => engine.RememberAsync(raw, cancellationToken));

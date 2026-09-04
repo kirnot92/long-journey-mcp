@@ -66,8 +66,6 @@ dotnet run --project src/LongJourney.Server -- --Server:Port=5088 --Engine:DataD
 
 문자·개수 제한과 탐색 크기는 변경 가능한 구현 기본값이다. 상한을 초과한 raw를 임의로 자르지 않고 입력 오류를 반환한다. 1개를 기본으로 하는 observation 상한도 설정값이며, 고정된 Core invariant로 새로 도입한 것은 아니다. Source 하나는 observation 개수와 관계없이 root 하나로 센다.
 
-대화는 개별 발화로 잘라 넣지 않고 원래 순서·역할이 포함된 전체 맥락을 raw로 전달한다. 운영 기본값 4,000자/observation 1개는 짧은 입력을 위한 기존 제한이며 대화 세션 benchmark의 설정과 다르다. 세션 실험과 같은 제한으로 서버를 쓰려면 `--Engine:MaxRawCharacters=64000 --Engine:MaxObservations=32 --OpenAI:Remember:MaxOutputTokens=8192`를 지정한다. 세션이 더 크면 충분한 한도를 명시적으로 설정하며 원문을 임의 분할하지 않는다. 실험 결과와 남은 정보 손실은 [세션 실험 기록](13-session-pilot.md)을 참고한다.
-
 Core invariant는 모든 생성 경로에서 강제한다. 같은 바로 아래 depth의 부모가 최소 B개 있어야 하고, 서로 다른 Source root의 합집합이 `B^depth` 이상이어야 한다. `RootBase`는 신규 corpus에서 선택하며 기존 corpus의 값을 설정만 바꿔 변경할 수 없다. 원문·content·부모 provenance는 생성 뒤 수정하지 않는다.
 
 ## MCP 도구와 결과
@@ -80,7 +78,7 @@ Core invariant는 모든 생성 경로에서 강제한다. 같은 바로 아래 
 | `recall` | `query`, 선택적 `context` | `memories` |
 | `trace` | `memory_id` | `memory_id`, 부모를 포함한 `memories`, 원문이 포함된 `sources` |
 
-Source 생성 시각은 내부에서 기록한다. `remember`에 발언자·프로젝트·세션 필수 인자는 없다. 동일 raw는 문자열 완전 일치 기준이고 공백·대소문자 차이는 별개 입력이다. 중복 완료 입력은 기존 ID와 기억을 반환한다. 처리 중이면 기존 Source의 상태를 반환하며, 실패한 입력은 같은 Source로 다시 처리할 수 있다.
+`remember`에는 호출 에이전트가 기억할 가치가 있다고 선택한 하나의 일관된 경험과 그 경험을 이해하는 데 필요한 맥락을 전달한다. Source 생성 시각은 내부에서 기록한다. 발언자·프로젝트·세션 필수 인자는 없다. 동일 raw는 문자열 완전 일치 기준이고 공백·대소문자 차이는 별개 입력이다. 중복 완료 입력은 기존 ID와 기억을 반환한다. 처리 중이면 기존 Source의 상태를 반환하며, 실패한 입력은 같은 Source로 다시 처리할 수 있다.
 
 각 기억의 `relations`에는 `related_memory_id`, `kind`, `related_at`, `sequence`가 있다. `positive_related`/`negative_related`는 outgoing ID 목록이다. A→B 관계를 추가해도 B→A를 만들거나 조회하지 않는다. 동일 방향에서 positive와 negative는 별도로 존재할 수 있다. 재발견은 기존 `related_at`을 갱신하지 않는다. `trace`는 immutable `derived_from`으로 부모와 원문만 추적한다.
 
@@ -127,7 +125,7 @@ dotnet run --project src/LongJourney.Server -- --reindex --Engine:DataDirectory=
 2026-09-04 사용자 요청으로 환경변수 외에 key.txt 입력을 지원한다. API 사용 확정 원문은 보존하며 인증 입력에 관한 현재 동작은 이 절을 따른다.
 
 - OPENAI_API_KEY가 있으면 파일보다 우선한다.
-- 기본 파일은 서버 content root의 key.txt다. dotnet run --project로 src/LongJourney.Server 또는 src/LongJourney.Benchmarks에서 실행할 때에는 해당 프로젝트와 LongJourney.slnx가 있는 저장소 구조를 확인하여 루트의 key.txt도 사용한다. 프로젝트 폴더에 key.txt가 있으면 그 파일이 우선한다.
+- 기본 파일은 서버 content root의 key.txt다. dotnet run --project로 src/LongJourney.Server에서 실행할 때에는 해당 프로젝트와 LongJourney.slnx가 있는 저장소 구조를 확인하여 루트의 key.txt도 사용한다. 프로젝트 폴더에 key.txt가 있으면 그 파일이 우선한다.
 - 다른 위치는 --OpenAI:ApiKeyFile=D:/Secrets/key.txt 또는 OpenAI__ApiKeyFile로 지정한다. 상대 경로는 content root 기준이다.
 - 파일에는 키 한 개만 넣는다. 앞뒤 공백·개행은 제거하며 내부 공백이나 여러 줄의 값은 오류로 처리한다.
 - 파일 내용은 API 요청마다 읽으므로 같은 파일의 키를 교체한 뒤 다음 요청부터 적용된다. 파일 경로 설정을 변경하면 서버를 다시 시작한다.

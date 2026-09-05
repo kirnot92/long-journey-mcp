@@ -92,6 +92,8 @@ Daily Dream은 해당 날짜에 생성된 모든 depth 0 기억과 해당 날짜
 
 같은 Dream run에서 Memory ID 집합이 정확히 같은 consolidation neighborhood는 한 번만 LLM으로 처리한다. ID를 ordinal 정렬해 입력 순서와 canonical key를 고정하며, 일부만 겹치는 집합을 유사도 heuristic으로 합치지는 않는다. Neighborhood당 Dream abstraction은 `0..1`개다. 여러 부모를 함께 보아야 드러나는 패턴·조건·차이·예외가 없으면 빈 결과를 허용하고, 단순 요약·재서술·일반화나 미래 assistant 행동 지침은 만들지 않는다. 이 정책은 Meditation에는 적용되지 않는다.
 
+Dream과 Meditation 모두 최종 neighborhood 안에 같은 depth `d`의 부모가 B개 이상 있고, 그 부모들의 서로 다른 Source root 합집합이 `B^(d+1)` 이상인지 먼저 확인한다. 어떤 depth도 조건을 충족하지 못하면 raw Source 읽기와 추상화 LLM 호출을 생략한다. 해당 work에는 model 표식 `consolidation-ineligible`과 빈 proposal을 저장해 재시작 후에도 완료 결과를 유지한다. 기존 proposal은 다시 생성하지 않고 적용한다. Neighborhood 검색, assimilation, Meditation priority 호출 비용은 여전히 발생할 수 있다.
+
 주간 구간은 최초 corpus 활동 날짜를 기준으로 7일씩 이어진다. 특정 요일에 고정한 달력 주가 아니며, 각 일일 구간 처리가 끝난 뒤 그에 대응하는 7일 구간이 완성되면 Meditation을 실행한다. 서버가 며칠 꺼졌다면 놓친 날짜와 주간 구간을 차례로 따라잡는다. 미설정 budget 때문에 주간 구간을 버리거나 완료로 표시하지 않는다. 이때 budget을 나중에 설정하면 밀린 여러 주가 각각 N달러의 별도 budget으로 실행될 수 있다.
 
 Meditation은 구간 안에서 생성된 depth >= 1 기억과, 그 기간에 outgoing relation이 추가된 depth >= 1 기억을 결정적으로 수집한다. Relation target이 depth 0이어도 owner가 depth >= 1이면 포함한다. 수집한 모든 후보와 기존 이월 작업의 처리 순서는 설정된 Meditation LLM이 한 번의 priority 판단으로 결정한다. 각 후보의 내용과 outgoing relation의 종류·추가 시각·대상 내용을 전달하며, negative relation 수나 최근 변경 시각으로 정렬하지 않는다. Priority 후보에는 Recall/graph 탐색 개수 제한을 적용하지 않는다. 개별 작업에서는 기존처럼 더 넓은 그래프, depth 0, raw Source를 확인할 수 있다.

@@ -185,6 +185,10 @@ Daily Dream의 seed는 다음으로 제한한다.
 
 최초 설계의 Assimilation과 Consolidation 구조, same-depth 부모 선택, Core validation 및 Dream generation barrier는 유지한다. 실행 중 생성한 Memory를 같은 Dream에서 다시 생성 재료로 사용할 수 없다.
 
+Dream과 Meditation의 consolidation은 최종 neighborhood를 구성한 뒤, 추상화 LLM 호출 전에 생성 가능한 depth가 있는지 검사한다. 같은 depth `d`의 서로 다른 후보 부모가 최소 B개이고, 그 부모 전체의 `derived_from`을 고정 snapshot에서 추적한 서로 다른 Source root의 합집합이 `B^(d+1)` 이상인 그룹이 하나라도 있어야 한다. 부모별 root 수를 단순 합산하거나 서로 다른 depth의 근거를 합치지 않는다. Meditation에서는 seed와 다른 depth의 그룹도 검사한다.
+
+어느 그룹도 조건을 만족하지 못하면 raw Source를 읽거나 추상화 LLM을 호출하지 않고 빈 proposal을 저장해 작업을 완료한다. 저장된 proposal은 재개 시 그대로 사용한다. 이 검사는 구조적으로 불가능한 생성만 생략하며, 실제 LLM proposal의 부모·근거 검증과 저장 트랜잭션 내부 검증은 계속 수행한다. Assimilation, neighborhood 검색, Meditation priority 판단에는 이 생략 규칙을 적용하지 않는다.
+
 ### 8.2 중복 abstraction
 
 오늘 생성된 depth-0 Memory와 오늘 recall된 모든 depth의 Memory에서 시작하는 제한된 작업 범위로 불필요한 반복 생성을 줄인다.

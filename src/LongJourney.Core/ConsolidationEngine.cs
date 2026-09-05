@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Numerics;
 using System.Text.Json;
 
 namespace LongJourney.Core;
@@ -423,6 +424,12 @@ public sealed class ConsolidationEngine(
     {
         var neighborhood = precomputedNeighborhood ?? await RetrieveNeighborhoodAsync(
             seed, frozenEvidence, kind, chargedCallContext, cancellationToken);
+        var candidateIds = GetMemoryIds(neighborhood);
+        if (!CanFormAbstraction(neighborhood, memoriesById, cancellationToken))
+        {
+            return new CognitiveResult<SavedProposal>(
+                new SavedProposal(candidateIds, [], []), "consolidation-ineligible");
+        }
 
         IReadOnlyList<SourceArtifact> sources = [];
         if (kind == RunKind.Meditation)
@@ -434,9 +441,64 @@ public sealed class ConsolidationEngine(
         var result = await cognition.AbstractAsync(
             neighborhood, sources, role, chargedCallContext, cancellationToken);
 
-        var candidateIds = GetMemoryIds(neighborhood);
         var proposal = new SavedProposal(candidateIds, [], result.Value);
         return new CognitiveResult<SavedProposal>(proposal, result.Model);
+    }
+
+    private bool CanFormAbstraction(
+        IReadOnlyList<MemoryRecord> neighborhood,
+        IReadOnlyDictionary<string, MemoryRecord> memoriesById,
+        CancellationToken cancellationToken)
+    {
+        var candidateIdsByDepth = new Dictionary<int, HashSet<string>>();
+        foreach (var memory in neighborhood)
+        {
+            if (!candidateIdsByDepth.TryGetValue(memory.Depth, out var candidateIds))
+            {
+                candidateIds = new HashSet<string>(StringComparer.Ordinal);
+                candidateIdsByDepth.Add(memory.Depth, candidateIds);
+            }
+
+            candidateIds.Add(memory.Id);
+        }
+
+        foreach (var (parentDepth, candidateIds) in candidateIdsByDepth)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (candidateIds.Count < options.RootBase)
+            {
+                continue;
+            }
+
+            // All candidates on one layer may be parents. Their exact ancestry union
+            // is the largest root set any proposal from this layer could supply.
+            var requiredRoots = BigInteger.Pow(options.RootBase, checked(parentDepth + 1));
+            var sourceIds = new HashSet<string>(StringComparer.Ordinal);
+            var visitedIds = new HashSet<string>(StringComparer.Ordinal);
+            var queue = new Queue<string>(candidateIds);
+            while (queue.TryDequeue(out var memoryId))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!visitedIds.Add(memoryId))
+                {
+                    continue;
+                }
+
+                var memory = memoriesById[memoryId];
+                if (memory.SourceRef is not null && sourceIds.Add(memory.SourceRef) &&
+                    sourceIds.Count >= requiredRoots)
+                {
+                    return true;
+                }
+
+                foreach (var parentId in memory.DerivedFrom)
+                {
+                    queue.Enqueue(parentId);
+                }
+            }
+        }
+
+        return false;
     }
 
     private void ApplySavedRelations(

@@ -37,6 +37,7 @@ public sealed class OpenAiClient
         using var request = CreateRequest("responses", payload);
         cancellationToken.ThrowIfCancellationRequested();
 
+        using var activitySettings = ActivityScope.BeginApiSettings(model);
         var reservation = _ledger.ReserveUsage(runId, model.Model, operation,
             OpenAiPricing.Reserve(model, MaximumInputTokens(payload)), _time.GetUtcNow());
         using var response = await SendAsync(request, cancellationToken);
@@ -60,6 +61,12 @@ public sealed class OpenAiClient
         using var request = CreateRequest("embeddings", payload);
         cancellationToken.ThrowIfCancellationRequested();
 
+        using var activitySettings = ActivityScope.BeginApiSettings(new
+        {
+            model = _options.EmbeddingModel,
+            dimensions = _options.EmbeddingDimensions,
+            input_usd_per_million = _options.EmbeddingInputUsdPerMillion
+        });
         var reservation = _ledger.ReserveUsage(runId, _options.EmbeddingModel, "embedding",
             MaximumInputTokens(payload) * _options.EmbeddingInputUsdPerMillion / 1_000_000m, _time.GetUtcNow());
         using var response = await SendAsync(request, cancellationToken);

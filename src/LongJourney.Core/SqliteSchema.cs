@@ -129,6 +129,51 @@ internal static class SqliteSchema
             completed_at TEXT
         );
 
+        CREATE TABLE IF NOT EXISTS activity_operations (
+            id TEXT PRIMARY KEY,
+            kind TEXT NOT NULL,
+            origin TEXT NOT NULL,
+            parent_id TEXT,
+            source_id TEXT,
+            run_id INTEGER,
+            work_key TEXT,
+            charged_run_id INTEGER,
+            started_at TEXT NOT NULL,
+            completed_at TEXT,
+            status TEXT NOT NULL,
+            error_type TEXT,
+            details_json TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS activity_operations_started ON activity_operations(started_at);
+        CREATE TABLE IF NOT EXISTS activity_relation_results (
+            run_id INTEGER NOT NULL,
+            work_key TEXT NOT NULL,
+            proposal_index INTEGER NOT NULL,
+            activity_id TEXT,
+            at TEXT NOT NULL,
+            outcome TEXT NOT NULL,
+            memory_id TEXT NOT NULL,
+            related_memory_id TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            reason TEXT,
+            PRIMARY KEY(run_id,work_key,proposal_index)
+        );
+        CREATE TABLE IF NOT EXISTS activity_api_calls (
+            api_call_id TEXT PRIMARY KEY REFERENCES api_calls(id),
+            activity_id TEXT,
+            settings_json TEXT
+        );
+        CREATE TRIGGER IF NOT EXISTS immutable_activity_relation_result
+        BEFORE UPDATE ON activity_relation_results
+        BEGIN
+            SELECT RAISE(ABORT, 'Relation application results are immutable');
+        END;
+        CREATE TRIGGER IF NOT EXISTS no_activity_relation_result_delete
+        BEFORE DELETE ON activity_relation_results
+        BEGIN
+            SELECT RAISE(ABORT, 'Relation application results are immutable');
+        END;
+
         CREATE INDEX IF NOT EXISTS memories_created ON memories (created_at DESC, seq DESC);
         CREATE INDEX IF NOT EXISTS memories_depth_created ON memories (depth, created_at DESC, seq DESC);
         CREATE INDEX IF NOT EXISTS memories_source ON memories (source_ref, created_at DESC, seq DESC);

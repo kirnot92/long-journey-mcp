@@ -1,3 +1,5 @@
+using System.Text;
+
 namespace LongJourney.Core;
 
 public sealed class MemoryEngine(
@@ -8,6 +10,36 @@ public sealed class MemoryEngine(
     TimeProvider timeProvider)
 {
     public async Task<RememberResult> RememberAsync(string raw, CancellationToken cancellationToken = default)
+    {
+        using var activity = ActivityScope.Begin(store, "remember", "agent", timeProvider.GetUtcNow(),
+            new
+            {
+                raw_characters = raw?.Length,
+                raw_bytes = raw is null ? (int?)null : Encoding.UTF8.GetByteCount(raw),
+                created_ids = Array.Empty<string>(),
+                returned_ids = Array.Empty<string>(),
+                settings = options
+            });
+        try
+        {
+            var result = await RememberCoreAsync(raw!, cancellationToken);
+            activity.Update(new
+            {
+                returned_ids = result.Memories.Select(memory => memory.Id).ToArray(),
+                source_status = result.Status,
+                duplicate = result.Duplicate
+            });
+            activity.Complete(timeProvider.GetUtcNow());
+            return result;
+        }
+        catch (Exception error)
+        {
+            activity.Fail(error, timeProvider.GetUtcNow());
+            throw;
+        }
+    }
+
+    private async Task<RememberResult> RememberCoreAsync(string raw, CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(raw);
         if (raw.Length > options.MaxRawCharacters)
@@ -22,12 +54,14 @@ public sealed class MemoryEngine(
         var sourceId = artifact.Source.Id;
         if (!store.ClaimSource(sourceId))
         {
+            ActivityScope.UpdateCurrent(new { extraction_performed = false });
             return store.ReadRememberResult(sourceId, true);
         }
 
+        ActivityScope.UpdateCurrent(new { extraction_performed = true });
         try
         {
-            return await ExtractAndSaveObservationsAsync(artifact, cancellationToken);
+            return await ExtractAndSaveObservationsAsync(artifact, "agent", cancellationToken);
         }
         catch
         {
@@ -48,18 +82,24 @@ public sealed class MemoryEngine(
                 continue;
             }
 
+            using var activity = ActivityScope.Begin(store, "extraction", "recovery", timeProvider.GetUtcNow(),
+                new { created_ids = Array.Empty<string>(), returned_ids = Array.Empty<string>(), model_invoked = false, settings = options },
+                sourceId: source.Id);
             try
             {
                 var artifact = store.ReadSource(source.Id);
-                await ExtractAndSaveObservationsAsync(artifact, cancellationToken);
+                await ExtractAndSaveObservationsCoreAsync(artifact, cancellationToken);
+                activity.Complete(timeProvider.GetUtcNow());
             }
-            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            catch (OperationCanceledException error) when (cancellationToken.IsCancellationRequested)
             {
+                activity.Fail(error, timeProvider.GetUtcNow());
                 store.FailSource(source.Id);
                 throw;
             }
             catch (Exception error)
             {
+                activity.Fail(error, timeProvider.GetUtcNow());
                 store.FailSource(source.Id);
                 failures.Add(new IngestionFailure(source.Id, error.GetType().Name));
             }
@@ -73,6 +113,23 @@ public sealed class MemoryEngine(
         string? context = null,
         CancellationToken cancellationToken = default)
     {
+        using var activity = ActivityScope.Begin(store, "recall", "agent", timeProvider.GetUtcNow(),
+            new { query, context, candidate_ids = Array.Empty<string>(), returned_ids = Array.Empty<string>(), settings = options });
+        try
+        {
+            var result = await RecallCoreAsync(query, context, cancellationToken);
+            activity.Complete(timeProvider.GetUtcNow());
+            return result;
+        }
+        catch (Exception error)
+        {
+            activity.Fail(error, timeProvider.GetUtcNow());
+            throw;
+        }
+    }
+
+    private async Task<RecallResult> RecallCoreAsync(string query, string? context, CancellationToken cancellationToken)
+    {
         if (string.IsNullOrWhiteSpace(query))
         {
             throw new InputException("query must not be empty.");
@@ -84,6 +141,7 @@ public sealed class MemoryEngine(
         }
 
         var candidates = await search.SearchAsync(query, new CallContext(), cancellationToken);
+        ActivityScope.UpdateCurrent(new { candidate_ids = candidates.Select(memory => memory.Id).ToArray() });
         if (candidates.Count == 0)
         {
             return new RecallResult([]);
@@ -190,6 +248,27 @@ public sealed class MemoryEngine(
 
     private async Task<RememberResult> ExtractAndSaveObservationsAsync(
         SourceArtifact artifact,
+        string origin,
+        CancellationToken cancellationToken)
+    {
+        using var activity = ActivityScope.Begin(store, "extraction", origin, timeProvider.GetUtcNow(),
+            new { created_ids = Array.Empty<string>(), returned_ids = Array.Empty<string>(), model_invoked = false, settings = options },
+            sourceId: artifact.Source.Id);
+        try
+        {
+            var result = await ExtractAndSaveObservationsCoreAsync(artifact, cancellationToken);
+            activity.Complete(timeProvider.GetUtcNow());
+            return result;
+        }
+        catch (Exception error)
+        {
+            activity.Fail(error, timeProvider.GetUtcNow());
+            throw;
+        }
+    }
+
+    private async Task<RememberResult> ExtractAndSaveObservationsCoreAsync(
+        SourceArtifact artifact,
         CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(artifact.Raw))
@@ -198,6 +277,7 @@ public sealed class MemoryEngine(
             return new RememberResult(artifact.Source.Id, false, []);
         }
 
+        ActivityScope.UpdateCurrent(new { model_invoked = true });
         var proposals = await cognition.ExtractAsync(artifact.Raw, new CallContext(), cancellationToken);
         if (proposals.Value.Count > options.MaxObservations)
         {

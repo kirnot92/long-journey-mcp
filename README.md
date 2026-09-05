@@ -81,6 +81,11 @@ API 키가 없어도 서버를 시작하고 저장된 데이터를 `trace`와 In
 이 옵션은 미완료 Source의 백그라운드 재시도와 Dream/Meditation을 끕니다. 서버 시작 시 저장소 복구는 유지합니다.
 화면별 사용법과 조회 범위는 [Inspection 안내](docs/09-inspection.md)에 정리되어 있습니다.
 
+실사용 호출과 기억 처리 결과는 [Daily Report](docs/14-daily-report.md)에 기록됩니다.
+Remember의 raw 크기·생성 D0, Recall 반환, Assimilation 제안과 실제 관계 추가, 단계별 비용을
+데이터 폴더의 `reports/daily/`에 Markdown·JSON으로 자동 저장합니다. 보고서 생성에는 API 비용이 들지 않습니다.
+`--no-scheduler`에서도 보고 작업은 동작하며, 자동 파일 생성은 `--Engine:DailyReportsEnabled=false`로 끌 수 있습니다.
+
 ## 자동 작업과 비용
 
 스케줄러는 기본 서울 시간(`Asia/Seoul`)을 기준으로 종료된 날짜를 처리합니다.

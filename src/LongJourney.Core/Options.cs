@@ -19,6 +19,8 @@ public sealed class EngineOptions
     }
     public bool SchedulerEnabled { get; set; } = true;
     public int SchedulerPollSeconds { get; set; } = 60;
+    public bool DailyReportsEnabled { get; set; } = true;
+    public int DailyReportPollSeconds { get; set; } = 60;
 
     public void Validate()
     {
@@ -56,6 +58,12 @@ public sealed class EngineOptions
         {
             throw new InputException(
                 $"Engine:SchedulerPollSeconds must be between 1 and {maximumPollSeconds} seconds.");
+        }
+
+        if (DailyReportPollSeconds < 1 || DailyReportPollSeconds > maximumPollSeconds)
+        {
+            throw new InputException(
+                $"Engine:DailyReportPollSeconds must be between 1 and {maximumPollSeconds} seconds.");
         }
 
         if (MeditationBudgetUsd is <= 0)

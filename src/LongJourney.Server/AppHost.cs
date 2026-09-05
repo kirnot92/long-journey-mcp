@@ -26,12 +26,7 @@ public static class AppHost
             }
         }
 
-        var builder = WebApplication.CreateBuilder(new WebApplicationOptions
-        {
-            Args = hostArguments.ToArray(),
-            ApplicationName = typeof(AppHost).Assembly.GetName().Name,
-            WebRootPath = Path.Combine(AppContext.BaseDirectory, "wwwroot")
-        });
+        var builder = CreateHostBuilder(hostArguments.ToArray());
         configure?.Invoke(builder);
 
         var engineOptions = ReadEngineOptions(builder, disableScheduler);
@@ -63,6 +58,15 @@ public static class AppHost
             throw;
         }
     }
+
+    // Shared with report-only configuration loading; constructing a builder does not start services.
+    internal static WebApplicationBuilder CreateHostBuilder(string[] args) =>
+        WebApplication.CreateBuilder(new WebApplicationOptions
+        {
+            Args = args,
+            ApplicationName = typeof(AppHost).Assembly.GetName().Name,
+            WebRootPath = Path.Combine(AppContext.BaseDirectory, "wwwroot")
+        });
 
     private static EngineOptions ReadEngineOptions(
         WebApplicationBuilder builder,
@@ -124,7 +128,9 @@ public static class AppHost
         {
             // The lock must be held before the store recovers interrupted extraction.
             _ = provider.GetRequiredService<CorpusLease>();
-            return new SqliteMemoryStore(engineOptions);
+            var store = new SqliteMemoryStore(engineOptions);
+            store.ActivateActivityRecording(provider.GetRequiredService<TimeProvider>().GetUtcNow());
+            return store;
         });
         services.AddSingleton<IInspectionReader>(provider => (IInspectionReader)provider.GetRequiredService<IMemoryStore>());
         services.AddSingleton<IUsageLedger>(provider => provider.GetRequiredService<IMemoryStore>());
@@ -142,6 +148,10 @@ public static class AppHost
         services.AddSingleton<ConsolidationEngine>();
         services.AddSingleton<MemoryScheduler>();
         services.AddHostedService<SchedulerWorker>();
+        services.AddSingleton(provider => new DailyReportService(
+            engineOptions.DataDirectory, engineOptions.TimeZoneId,
+            provider.GetRequiredService<TimeProvider>()));
+        services.AddHostedService<DailyReportWorker>();
     }
 
     private static void ConfigureRequestPipeline(WebApplication app)

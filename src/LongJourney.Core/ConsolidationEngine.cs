@@ -312,6 +312,39 @@ public sealed class ConsolidationEngine(
         HashSet<string>? dreamNeighborhoodKeys,
         CancellationToken cancellationToken)
     {
+        using var activity = ActivityScope.Begin(store, originalItem.Phase,
+            originRun.Kind.ToString().ToLowerInvariant(), timeProvider.GetUtcNow(),
+            new
+            {
+                seed_id = originalItem.MemoryId,
+                period_start = originRun.PeriodStart,
+                period_end = originRun.PeriodEnd,
+                proposal_reused = originalItem.ProposalJson is not null,
+                model_invoked = false,
+                settings = options
+            },
+            runId: originRun.Id, workKey: originalItem.Key, chargedRunId: chargedCallContext.RunId);
+        try
+        {
+            await ProcessOriginalWorkCoreAsync(originRun, originalItem, frozenEvidence,
+                chargedCallContext, dreamNeighborhoodKeys, cancellationToken);
+            activity.Complete(timeProvider.GetUtcNow());
+        }
+        catch (Exception error)
+        {
+            activity.Fail(error, timeProvider.GetUtcNow());
+            throw;
+        }
+    }
+
+    private async Task ProcessOriginalWorkCoreAsync(
+        RunRecord originRun,
+        RunWorkItem originalItem,
+        GraphSnapshot frozenEvidence,
+        CallContext chargedCallContext,
+        HashSet<string>? dreamNeighborhoodKeys,
+        CancellationToken cancellationToken)
+    {
         var memoriesById = frozenEvidence.ById;
         if (!memoriesById.TryGetValue(originalItem.MemoryId, out var seed))
         {
@@ -378,6 +411,13 @@ public sealed class ConsolidationEngine(
             store.SaveWorkProposal(originRun.Id, originalItem.Key, proposalJson, model);
         }
 
+        ActivityScope.UpdateCurrent(new
+        {
+            candidate_ids = savedProposal.AllowedCandidateIds,
+            relations = savedProposal.Relations,
+            abstractions = savedProposal.Abstractions,
+            model
+        });
         if (string.IsNullOrWhiteSpace(model))
         {
             throw new InvariantException("Stored proposal model is missing.");
@@ -405,6 +445,7 @@ public sealed class ConsolidationEngine(
     {
         var candidates = await RetrieveAssimilationCandidatesAsync(
             seed, frozenEvidence, chargedCallContext, cancellationToken);
+        ActivityScope.UpdateCurrent(new { candidate_ids = GetMemoryIds(candidates), model_invoked = true });
         var result = await cognition.AssimilateAsync(
             seed, candidates, chargedCallContext, cancellationToken);
 
@@ -425,6 +466,7 @@ public sealed class ConsolidationEngine(
         var neighborhood = precomputedNeighborhood ?? await RetrieveNeighborhoodAsync(
             seed, frozenEvidence, kind, chargedCallContext, cancellationToken);
         var candidateIds = GetMemoryIds(neighborhood);
+        ActivityScope.UpdateCurrent(new { candidate_ids = candidateIds });
         if (!CanFormAbstraction(neighborhood, memoriesById, cancellationToken))
         {
             return new CognitiveResult<SavedProposal>(
@@ -438,6 +480,7 @@ public sealed class ConsolidationEngine(
         }
 
         var role = kind == RunKind.Dream ? CognitionRole.Dream : CognitionRole.Meditation;
+        ActivityScope.UpdateCurrent(new { model_invoked = true });
         var result = await cognition.AbstractAsync(
             neighborhood, sources, role, chargedCallContext, cancellationToken);
 
@@ -528,11 +571,25 @@ public sealed class ConsolidationEngine(
                         "Assimilation must uniquely relate a supplied candidate to the observation, with no self edge.");
                 }
 
-                store.AddRelation(proposal, originRun, timeProvider.GetUtcNow());
+                if (store is IActivityRecorder recorder)
+                {
+                    recorder.ApplyActivityRelation(proposal, originRun, originalItem.Key, index, timeProvider.GetUtcNow());
+                }
+                else
+                {
+                    store.AddRelation(proposal, originRun, timeProvider.GetUtcNow());
+                }
             }
             catch (InvariantException error)
             {
-                store.RejectProposal(originRun.Id, originalItem.Key, index, error.Message);
+                if (store is IActivityRecorder recorder)
+                {
+                    recorder.ApplyActivityRelation(proposal, originRun, originalItem.Key, index, timeProvider.GetUtcNow(), error.Message);
+                }
+                else
+                {
+                    store.RejectProposal(originRun.Id, originalItem.Key, index, error.Message);
+                }
             }
         }
     }

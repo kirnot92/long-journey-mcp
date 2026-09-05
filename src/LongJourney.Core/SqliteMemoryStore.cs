@@ -111,6 +111,8 @@ public sealed partial class SqliteMemoryStore : IMemoryStore
                     throw new InvariantException("Source hash collision or corrupt source archive.");
                 }
 
+                MergeActivityDetails(db, tx, ActivityScope.CurrentId,
+                    new { new_source = false, source_status = existingSource.Status }, existingSource.Id);
                 tx.Commit();
                 return existingArtifact;
             }
@@ -118,6 +120,8 @@ public sealed partial class SqliteMemoryStore : IMemoryStore
             // Persist the file first: a crash before commit leaves an artifact startup can recover.
             using var archiveWrite = _sourceArchive.WriteImmutable(raw, contentHash, now);
             InsertSource(db, tx, archiveWrite.Artifact.Source);
+            MergeActivityDetails(db, tx, ActivityScope.CurrentId,
+                new { new_source = true, source_status = "pending" }, archiveWrite.Artifact.Source.Id);
             tx.Commit();
             return archiveWrite.Artifact;
         }
@@ -169,13 +173,26 @@ public sealed partial class SqliteMemoryStore : IMemoryStore
     public bool ClaimSource(string sourceId)
     {
         using var db = OpenConnection();
-        return ExecuteNonQuery(db, null, "UPDATE sources SET status='processing' WHERE id=$id AND status IN ('pending','failed')", ("$id", sourceId)) == 1;
+        using var tx = db.BeginTransaction();
+        var claimed = ExecuteNonQuery(db, tx, "UPDATE sources SET status='processing' WHERE id=$id AND status IN ('pending','failed')", ("$id", sourceId)) == 1;
+        if (claimed)
+        {
+            MergeActivityDetails(db, tx, ActivityScope.CurrentId, new { source_status = "processing" }, sourceId);
+        }
+        tx.Commit();
+        return claimed;
     }
 
     public void FailSource(string sourceId)
     {
         using var db = OpenConnection();
-        ExecuteNonQuery(db, null, "UPDATE sources SET status='failed' WHERE id=$id AND status='processing'", ("$id", sourceId));
+        using var tx = db.BeginTransaction();
+        var failed = ExecuteNonQuery(db, tx, "UPDATE sources SET status='failed' WHERE id=$id AND status='processing'", ("$id", sourceId)) == 1;
+        if (failed)
+        {
+            MergeActivityDetails(db, tx, ActivityScope.CurrentId, new { source_status = "failed" }, sourceId);
+        }
+        tx.Commit();
     }
 
     public IReadOnlyList<SourceRecord> GetIncompleteSources()
@@ -245,18 +262,23 @@ public sealed partial class SqliteMemoryStore : IMemoryStore
             }
 
             _ = _sourceArchive.Read(source);
+            var createdIds = new List<string>();
             for (var index = 0; index < observations.Count; index++)
             {
                 var observation = observations[index];
                 CheckContent(observation.Content);
                 CheckEmbedding(observation.Embedding);
                 var id = memoryIds is null ? CreateId("mem_") : memoryIds[index];
+                createdIds.Add(id);
                 InsertMemory(db, tx, id, 0, observation.Content, sourceId, now, 0, observation.Model, $"source:{sourceId}:{index}");
                 ExecuteNonQuery(db, tx, "INSERT INTO memory_roots(memory_id,source_id) VALUES($id,$src)", ("$id", id), ("$src", sourceId));
                 ExecuteNonQuery(db, tx, "UPDATE memories SET sealed=1 WHERE id=$id", ("$id", id));
                 SaveEmbedding(db, tx, id, observation.Embedding);
             }
             ExecuteNonQuery(db, tx, "UPDATE sources SET status='complete' WHERE id=$id", ("$id", sourceId));
+            var activityDetails = new { created_ids = createdIds, returned_ids = createdIds, source_status = "complete" };
+            MergeActivityDetails(db, tx, ActivityScope.CurrentId, activityDetails, sourceId);
+            MergeActivityDetails(db, tx, ActivityScope.ParentId, new { created_ids = createdIds, source_status = "complete" }, sourceId);
             tx.Commit();
         }
     }
@@ -440,6 +462,7 @@ public sealed partial class SqliteMemoryStore : IMemoryStore
             ExecuteNonQuery(db, tx, "INSERT INTO recall_events(memory_id,recalled_at) VALUES($id,$at)", ("$id", id), ("$at", FormatTimestamp(now)));
             ExecuteNonQuery(db, tx, "UPDATE memories SET last_recalled_at=CASE WHEN last_recalled_at IS NULL OR last_recalled_at<$at THEN $at ELSE last_recalled_at END WHERE id=$id", ("$id", id), ("$at", FormatTimestamp(now)));
         }
+        MergeActivityDetails(db, tx, ActivityScope.CurrentId, new { returned_ids = ids });
         tx.Commit();
     }
 
@@ -773,13 +796,20 @@ public sealed partial class SqliteMemoryStore : IMemoryStore
 
     public void AddRelation(RelationProposal proposal, RunRecord run, DateTimeOffset now)
     {
+        using var db = OpenConnection();
+        using var tx = db.BeginTransaction();
+        AddRelationCore(db, tx, proposal, run, now);
+        tx.Commit();
+    }
+
+    private static bool AddRelationCore(SqliteConnection db, SqliteTransaction tx,
+        RelationProposal proposal, RunRecord run, DateTimeOffset now)
+    {
         if (proposal.MemoryId == proposal.RelatedMemoryId || !Enum.IsDefined(proposal.Kind))
         {
             throw new InvariantException("Invalid relation.");
         }
 
-        using var db = OpenConnection();
-        using var tx = db.BeginTransaction();
         foreach (var id in new[] { proposal.MemoryId, proposal.RelatedMemoryId })
         {
             var count = Convert.ToInt32(ExecuteScalar(db, tx, "SELECT COUNT(*) FROM memories WHERE id=$id AND seq<=$max AND dream_revision<$revision AND sealed=1",
@@ -789,9 +819,8 @@ public sealed partial class SqliteMemoryStore : IMemoryStore
                 throw new InvariantException("Relation references a memory outside the run snapshot.");
             }
         }
-        ExecuteNonQuery(db, tx, "INSERT OR IGNORE INTO relations(memory_id,related_memory_id,kind,related_at,run_id) VALUES($a,$b,$kind,$at,$run)",
-            ("$a", proposal.MemoryId), ("$b", proposal.RelatedMemoryId), ("$kind", proposal.Kind.ToString().ToLowerInvariant()), ("$at", FormatTimestamp(now)), ("$run", run.Id));
-        tx.Commit();
+        return ExecuteNonQuery(db, tx, "INSERT OR IGNORE INTO relations(memory_id,related_memory_id,kind,related_at,run_id) VALUES($a,$b,$kind,$at,$run)",
+            ("$a", proposal.MemoryId), ("$b", proposal.RelatedMemoryId), ("$kind", proposal.Kind.ToString().ToLowerInvariant()), ("$at", FormatTimestamp(now)), ("$run", run.Id)) == 1;
     }
 
     public void FinishRun(long runId, string status, DateTimeOffset now)
@@ -836,6 +865,8 @@ public sealed partial class SqliteMemoryStore : IMemoryStore
         var reservation = new UsageReservation(CreateId("call_"), runId, model, operation, maximumUsd);
         ExecuteNonQuery(db, tx, "INSERT INTO api_calls(id,run_id,model,operation,reserved_usd,created_at) VALUES($id,$run,$model,$op,$cost,$at)",
             ("$id", reservation.Id), ("$run", runId), ("$model", model), ("$op", operation), ("$cost", maximumUsd.ToString(CultureInfo.InvariantCulture)), ("$at", FormatTimestamp(now)));
+        ExecuteNonQuery(db, tx, "INSERT INTO activity_api_calls(api_call_id,activity_id,settings_json) VALUES($call,$activity,$settings)",
+            ("$call", reservation.Id), ("$activity", ActivityScope.CurrentId), ("$settings", ActivityScope.ApiSettingsJson));
         tx.Commit();
         return reservation;
     }

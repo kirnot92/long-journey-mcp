@@ -1,6 +1,13 @@
 using LongJourney.Core;
 using LongJourney.Server;
 
+var reportExitCode = DailyReportCommand.Run(args, Console.Out, Console.Error);
+if (reportExitCode is not null)
+{
+    Environment.ExitCode = reportExitCode.Value;
+    return;
+}
+
 var reindex = false;
 var hostArguments = new List<string>();
 foreach (var argument in args)

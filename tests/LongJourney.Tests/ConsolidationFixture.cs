@@ -11,6 +11,7 @@ internal sealed class ConsolidationFixture : IDisposable
     public SqliteMemoryStore Store { get; }
     public ConsolidationClock Clock { get; } = new() { Now = new DateTimeOffset(2026, 9, 4, 12, 0, 0, TimeSpan.Zero) };
     public ConsolidationCognition Cognition { get; } = new();
+    public ConsolidationSearch Search { get; } = new();
     public ConsolidationEngine Engine { get; }
     public ConsolidationFixture()
     {
@@ -21,7 +22,7 @@ internal sealed class ConsolidationFixture : IDisposable
             MeditationBudgetUsd = 1m
         };
         Store = new SqliteMemoryStore(Options);
-        Engine = new ConsolidationEngine(Store, Cognition, new ConsolidationSearch(), Options, Clock);
+        Engine = new ConsolidationEngine(Store, Cognition, Search, Options, Clock);
     }
 
     public MemoryRecord[] Observations(int count, DateTimeOffset at)
@@ -87,6 +88,8 @@ internal sealed class ConsolidationClock : TimeProvider
 
 internal sealed class ConsolidationSearch : IMemorySearch
 {
+    public Func<MemoryRecord, GraphSnapshot, IReadOnlyList<MemoryRecord>>? Nearest { get; set; }
+
     public Task<IReadOnlyList<MemoryRecord>> SearchAsync(
         string query, CallContext context, CancellationToken cancellationToken,
         GraphSnapshot? snapshot = null, int? depth = null, int? limit = null)
@@ -99,7 +102,9 @@ internal sealed class ConsolidationSearch : IMemorySearch
         MemoryRecord seed, GraphSnapshot snapshot, CallContext context,
         CancellationToken cancellationToken, int? depth = null, int? limit = null)
     {
-        var candidates = SelectCandidates(snapshot.Memories, depth, limit ?? 30, seed.Id);
+        var candidates = Nearest is null
+            ? SelectCandidates(snapshot.Memories, depth, limit ?? 30, seed.Id)
+            : Nearest(seed, snapshot);
         return Task.FromResult<IReadOnlyList<MemoryRecord>>(candidates);
     }
 

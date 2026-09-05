@@ -71,6 +71,9 @@ public sealed class ConsolidationEngine(
             {
                 var workItems = new List<RunWorkItem>(store.GetWorkItems(run.Id));
                 workItems.Sort(CompareWorkOrder);
+                var dreamNeighborhoodKeys = kind == RunKind.Dream
+                    ? RestoreDreamNeighborhoodKeys(workItems)
+                    : null;
                 foreach (var item in workItems)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -79,7 +82,8 @@ public sealed class ConsolidationEngine(
                         continue;
                     }
 
-                    await ProcessScheduledWorkAsync(run, item, frozenRuns, cancellationToken);
+                    await ProcessScheduledWorkAsync(
+                        run, item, frozenRuns, dreamNeighborhoodKeys, cancellationToken);
                 }
 
                 store.FinishRun(run.Id, "complete", timeProvider.GetUtcNow());
@@ -102,6 +106,7 @@ public sealed class ConsolidationEngine(
         RunRecord chargedRun,
         RunWorkItem scheduledItem,
         Dictionary<long, FrozenRunEvidence> frozenRuns,
+        HashSet<string>? dreamNeighborhoodKeys,
         CancellationToken cancellationToken)
     {
         var chargedCallContext = new CallContext(chargedRun.Id);
@@ -109,7 +114,7 @@ public sealed class ConsolidationEngine(
         {
             await ProcessOriginalWorkAsync(
                 chargedRun, scheduledItem, frozenRuns[chargedRun.Id].Snapshot,
-                chargedCallContext, cancellationToken);
+                chargedCallContext, dreamNeighborhoodKeys, cancellationToken);
             return;
         }
 
@@ -127,7 +132,7 @@ public sealed class ConsolidationEngine(
             // Only API charges belong to the run that is executing the carry item now.
             await ProcessOriginalWorkAsync(
                 originalEvidence.Run, originalItem, originalEvidence.Snapshot,
-                chargedCallContext, cancellationToken);
+                chargedCallContext, dreamNeighborhoodKeys, cancellationToken);
         }
 
         store.CompleteWork(chargedRun.Id, scheduledItem.Key);
@@ -303,6 +308,7 @@ public sealed class ConsolidationEngine(
         RunWorkItem originalItem,
         GraphSnapshot frozenEvidence,
         CallContext chargedCallContext,
+        HashSet<string>? dreamNeighborhoodKeys,
         CancellationToken cancellationToken)
     {
         var memoriesById = frozenEvidence.ById;
@@ -327,6 +333,33 @@ public sealed class ConsolidationEngine(
             {
                 generated = await GenerateAssimilationProposalAsync(
                     seed, frozenEvidence, chargedCallContext, cancellationToken);
+            }
+            else if (originRun.Kind == RunKind.Dream)
+            {
+                if (dreamNeighborhoodKeys is null)
+                {
+                    throw new InvariantException("Dream neighborhood registry is missing.");
+                }
+
+                var neighborhood = new List<MemoryRecord>(await RetrieveNeighborhoodAsync(
+                    seed, frozenEvidence, RunKind.Dream, chargedCallContext, cancellationToken));
+                neighborhood.Sort((left, right) =>
+                    StringComparer.Ordinal.Compare(left.Id, right.Id));
+                var candidateIds = GetMemoryIds(neighborhood);
+                var neighborhoodKey = CanonicalMemoryIdSet(candidateIds);
+
+                if (!dreamNeighborhoodKeys.Add(neighborhoodKey))
+                {
+                    generated = new CognitiveResult<SavedProposal>(
+                        new SavedProposal(candidateIds, [], []),
+                        "dream-neighborhood-deduplicated");
+                }
+                else
+                {
+                    generated = await GenerateAbstractionProposalAsync(
+                        seed, frozenEvidence, RunKind.Dream, memoriesById,
+                        chargedCallContext, cancellationToken, neighborhood);
+                }
             }
             else
             {
@@ -385,9 +418,10 @@ public sealed class ConsolidationEngine(
         RunKind kind,
         IReadOnlyDictionary<string, MemoryRecord> memoriesById,
         CallContext chargedCallContext,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        IReadOnlyList<MemoryRecord>? precomputedNeighborhood = null)
     {
-        var neighborhood = await RetrieveNeighborhoodAsync(
+        var neighborhood = precomputedNeighborhood ?? await RetrieveNeighborhoodAsync(
             seed, frozenEvidence, kind, chargedCallContext, cancellationToken);
 
         IReadOnlyList<SourceArtifact> sources = [];
@@ -414,6 +448,7 @@ public sealed class ConsolidationEngine(
         CancellationToken cancellationToken)
     {
         var allowedIds = new HashSet<string>(savedProposal.AllowedCandidateIds, StringComparer.Ordinal);
+        var seenRelations = new HashSet<RelationProposal>();
         for (var index = 0; index < savedProposal.Relations.Count; index++)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -425,10 +460,10 @@ public sealed class ConsolidationEngine(
                 var pointsToObservation = proposal.RelatedMemoryId == seed.Id;
                 var isSelfRelation = proposal.MemoryId == seed.Id;
                 if (!isSuppliedCandidate || !pointsToObservation ||
-                    isSelfRelation || !Enum.IsDefined(proposal.Kind))
+                    isSelfRelation || !Enum.IsDefined(proposal.Kind) || !seenRelations.Add(proposal))
                 {
                     throw new InvariantException(
-                        "Assimilation must relate a supplied candidate to the observation, with no self edge.");
+                        "Assimilation must uniquely relate a supplied candidate to the observation, with no self edge.");
                 }
 
                 store.AddRelation(proposal, originRun, timeProvider.GetUtcNow());
@@ -459,6 +494,12 @@ public sealed class ConsolidationEngine(
                 if (store.GetAppliedAbstraction(originRun.Id, originalItem.Key, index) is not null)
                 {
                     continue;
+                }
+
+                if (originRun.Kind == RunKind.Dream && index >= 1)
+                {
+                    throw new InvariantException(
+                        "Daily Dream allows at most one abstraction per consolidation neighborhood.");
                 }
 
                 // Validate before paying for embedding, then revalidate in the atomic store mutation.
@@ -808,6 +849,34 @@ public sealed class ConsolidationEngine(
         }
 
         return memoryIds;
+    }
+
+    private static HashSet<string> RestoreDreamNeighborhoodKeys(
+        IReadOnlyList<RunWorkItem> workItems)
+    {
+        var keys = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var item in workItems)
+        {
+            if (item.Phase != "consolidation" || item.ProposalJson is null)
+            {
+                continue;
+            }
+
+            var proposal = JsonSerializer.Deserialize<SavedProposal>(
+                item.ProposalJson, JsonDefaults.Options)
+                ?? throw new InvariantException("Stored consolidation proposal is invalid.");
+            keys.Add(CanonicalMemoryIdSet(proposal.AllowedCandidateIds));
+        }
+
+        return keys;
+    }
+
+    private static string CanonicalMemoryIdSet(IReadOnlyList<string> memoryIds)
+    {
+        var uniqueIds = new HashSet<string>(memoryIds, StringComparer.Ordinal);
+        var orderedIds = new List<string>(uniqueIds);
+        orderedIds.Sort(StringComparer.Ordinal);
+        return JsonSerializer.Serialize(orderedIds, JsonDefaults.Options);
     }
 
     private static bool InPeriod(DateTimeOffset timestamp, RunRecord run)

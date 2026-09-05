@@ -128,14 +128,6 @@ public sealed class OpenAiCognition : ICognition
             return new CognitiveResult<IReadOnlyList<RelationProposal>>(Array.Empty<RelationProposal>(), _options.Dream.Model);
         }
 
-        var candidateOwnerIds = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var candidate in candidates)
-        {
-            if (candidate.Id != observation.Id)
-            {
-                candidateOwnerIds.Add(candidate.Id);
-            }
-        }
         var kindSchema = new JsonObject
         {
             ["type"] = "string",
@@ -164,8 +156,7 @@ public sealed class OpenAiCognition : ICognition
                 candidates = PromptMemories(candidates, [observation.Id])
             },
             schema, context, cancellationToken);
-        var relations = ParseRelationProposals(
-            result.RootElement, candidateOwnerIds, observation.Id, maximumRelations);
+        var relations = ParseRelationProposals(result.RootElement, maximumRelations);
         return new CognitiveResult<IReadOnlyList<RelationProposal>>(relations, result.Model);
     }
 
@@ -191,36 +182,42 @@ public sealed class OpenAiCognition : ICognition
             return new CognitiveResult<IReadOnlyList<AbstractionProposal>>(Array.Empty<AbstractionProposal>(), _options.For(role).Model);
         }
 
-        var candidateParentIds = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var memory in neighborhood)
-        {
-            candidateParentIds.Add(memory.Id);
-        }
         var parentIdsSchema = StructuredOutputSchema.Array(StructuredOutputSchema.Text(128), neighborhood.Count);
         var abstractionSchema = StructuredOutputSchema.Object(
             ("content", StructuredOutputSchema.Text(_engine.MaxMemoryCharacters)),
             ("derived_from", parentIdsSchema));
-        var abstractionsSchema = StructuredOutputSchema.Array(abstractionSchema, _engine.NeighborhoodSize);
+        var maximumAbstractions = role == CognitionRole.Dream ? 1 : _engine.NeighborhoodSize;
+        var abstractionsSchema = StructuredOutputSchema.Array(abstractionSchema, maximumAbstractions);
         var schema = StructuredOutputSchema.Object(("abstractions", abstractionsSchema));
         var prompt = $"""
             Find tentative, useful patterns supported by a subset of the provided memories.
-            Produce 0..{_engine.NeighborhoodSize} abstraction proposals, content at most {_engine.MaxMemoryCharacters} characters.
+            Produce 0..{maximumAbstractions} abstraction proposals, content at most {_engine.MaxMemoryCharacters} characters.
             Each proposal needs at least {_engine.RootBase} distinct parents, all of exactly the same depth.
             Select only provided memory IDs as derived_from. The Core computes new depth as parent depth + 1.
             The Core requires at least {_engine.RootBase}^new_depth distinct source roots; overlapping provenance is not new evidence.
             You may read different depths and raw sources for context, but never mix depths within one proposal's parents.
             Make scope and conditions explicit. Preserve counterexamples and alternative explanations.
             Avoid generic summaries, unsupported causal claims, canonical user profiles, and rewriting existing memories.
-            Multiple overlapping parent subsets are allowed; no forced hard clustering or truth/confidence scores.
             """;
         if (role == CognitionRole.Meditation)
         {
-            prompt += "\nAnalyze wider patterns, unresolved contradictions, shared conditions, and alternative explanations. " +
+            prompt += "\nMultiple overlapping parent subsets are allowed; no forced hard clustering or truth/confidence scores. " +
+                      "Analyze wider patterns, unresolved contradictions, shared conditions, and alternative explanations. " +
                       "Use supplied raw sources to check interpretations; formulate causal ideas only as provisional hypotheses.";
         }
         else
         {
-            prompt += "\nConsolidate this local neighborhood without recursively using any proposals created during this response.";
+            prompt += """
+
+                Treat the supplied memories as one neighborhood, without centering any particular seed.
+                Propose at most one abstraction, choosing the clearest and most useful candidate if several exist.
+                Do not create an abstraction when it would only summarize, restate, or make the parents more general.
+                Propose one only when the parents together reveal a new repeated pattern, shared condition,
+                meaningful difference, exception, boundary condition, or other bounded abstraction that no one parent shows alone.
+                The content must be an observation or abstraction about past experience. Never write future assistant behavior,
+                recommendations, or instructions such as what the assistant should prioritize or do for similar questions.
+                Consolidate this local neighborhood without recursively using any proposals created during this response.
+                """;
         }
         using var result = await RespondAsync(role, role == CognitionRole.Dream ? "consolidation" : "meditation", prompt,
             new
@@ -230,7 +227,7 @@ public sealed class OpenAiCognition : ICognition
             },
             schema, context, cancellationToken);
         var proposals = ParseAbstractionProposals(
-            result.RootElement, candidateParentIds, neighborhood.Count);
+            result.RootElement, neighborhood.Count, maximumAbstractions);
         return new CognitiveResult<IReadOnlyList<AbstractionProposal>>(proposals, result.Model);
     }
 
@@ -295,8 +292,6 @@ public sealed class OpenAiCognition : ICognition
 
     private static IReadOnlyList<RelationProposal> ParseRelationProposals(
         JsonElement result,
-        IReadOnlySet<string> candidateOwnerIds,
-        string observationId,
         int maximumRelations)
     {
         StructuredOutputSchema.RequireObject(result, "relations");
@@ -314,31 +309,22 @@ public sealed class OpenAiCognition : ICognition
                 "negative" => RelationKind.Negative,
                 _ => throw new InvalidDataException("Unknown relation kind.")
             };
-            if (!candidateOwnerIds.Contains(owner) || target != observationId)
-            {
-                throw new InvalidDataException("Assimilation proposed an unknown or reversed relation.");
-            }
             relations.Add(new RelationProposal(owner, target, kind));
         }
-        var seenRelations = new HashSet<RelationProposal>();
-        foreach (var relation in relations)
-        {
-            if (!seenRelations.Add(relation))
-            {
-                throw new InvalidDataException("Assimilation returned duplicate relations.");
-            }
-        }
+        // Ownership, direction, snapshot membership and duplicates are graph semantics.
+        // The Core rejects each bad proposal durably while retaining valid siblings.
         return relations;
     }
 
     private IReadOnlyList<AbstractionProposal> ParseAbstractionProposals(
         JsonElement result,
-        IReadOnlySet<string> candidateParentIds,
-        int maximumParents)
+        int maximumParents,
+        int maximumAbstractions)
     {
         StructuredOutputSchema.RequireObject(result, "abstractions");
 
-        var abstractionItems = StructuredOutputSchema.ReadArray(result, "abstractions", _engine.NeighborhoodSize);
+        var abstractionItems = StructuredOutputSchema.ReadArray(
+            result, "abstractions", maximumAbstractions);
         var proposals = new List<AbstractionProposal>(abstractionItems.GetArrayLength());
         foreach (var item in abstractionItems.EnumerateArray())
         {
@@ -350,18 +336,9 @@ public sealed class OpenAiCognition : ICognition
             {
                 parentIds.Add(StructuredOutputSchema.ReadText(parentItem, 128));
             }
-            if (parentIds.Count == 0)
-            {
-                throw new InvalidDataException("Abstraction has empty, duplicate, or unknown parent IDs.");
-            }
-            var seenParentIds = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var parentId in parentIds)
-            {
-                if (!seenParentIds.Add(parentId) || !candidateParentIds.Contains(parentId))
-                {
-                    throw new InvalidDataException("Abstraction has empty, duplicate, or unknown parent IDs.");
-                }
-            }
+            // Parent membership, distinctness, depth and source-root support are graph invariants.
+            // Preserve syntactically valid proposals so the Core can reject each one durably
+            // without discarding valid siblings or retrying the paid generation call.
             proposals.Add(new AbstractionProposal(content, parentIds));
         }
         return proposals;

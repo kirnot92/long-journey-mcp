@@ -5,6 +5,23 @@ namespace LongJourney.Tests;
 
 public sealed class SearchTests
 {
+    [Fact]
+    public async Task CandidateDiagnosticsPreserveProductionRanking()
+    {
+        using var fixture = new ConsolidationFixture();
+        fixture.Observations(4, fixture.Clock.Now);
+        SearchCandidateTrace? trace = null;
+        var production = new MemorySearch(fixture.Store, fixture.Cognition, fixture.Options);
+        var observed = new MemorySearch(fixture.Store, fixture.Cognition, fixture.Options, value => trace = value);
+        var expected = await production.SearchAsync("observation", new CallContext(), default);
+        var actual = await observed.SearchAsync("observation", new CallContext(), default);
+        Assert.Equal(MemoryTestData.Ids(expected), MemoryTestData.Ids(actual));
+        Assert.NotNull(trace);
+        Assert.Equal(MemoryTestData.Ids(actual), trace.FusedMemoryIds);
+        Assert.NotEmpty(trace.LexicalMemoryIds);
+        Assert.NotEmpty(trace.SemanticMemoryIds);
+    }
+
     [Theory]
     [InlineData(0)]
     [InlineData(-1)]

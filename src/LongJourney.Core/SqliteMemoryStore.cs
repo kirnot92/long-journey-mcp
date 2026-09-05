@@ -193,6 +193,36 @@ public sealed partial class SqliteMemoryStore : IMemoryStore
 
     public void CompleteSource(string sourceId, IReadOnlyList<NewObservation> observations, DateTimeOffset now)
     {
+        CompleteSourceCore(sourceId, observations, now, null);
+    }
+
+    /// <summary>Imports shared observations while preserving their identities in an independent corpus.</summary>
+    public void CompleteSource(
+        string sourceId, IReadOnlyList<NewObservation> observations, DateTimeOffset now,
+        IReadOnlyList<string> memoryIds)
+    {
+        ArgumentNullException.ThrowIfNull(memoryIds);
+        if (memoryIds.Count != observations.Count)
+        {
+            throw new InvariantException("Shared observation IDs must match the observation count.");
+        }
+
+        var uniqueIds = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var memoryId in memoryIds)
+        {
+            if (string.IsNullOrWhiteSpace(memoryId) || !uniqueIds.Add(memoryId))
+            {
+                throw new InvariantException("Shared observation IDs must be nonempty and unique.");
+            }
+        }
+
+        CompleteSourceCore(sourceId, observations, now, memoryIds);
+    }
+
+    private void CompleteSourceCore(
+        string sourceId, IReadOnlyList<NewObservation> observations, DateTimeOffset now,
+        IReadOnlyList<string>? memoryIds)
+    {
         if (observations.Count > _options.MaxObservations)
         {
             throw new InvariantException("Observation count exceeds configured limit.");
@@ -219,7 +249,7 @@ public sealed partial class SqliteMemoryStore : IMemoryStore
                 var observation = observations[index];
                 CheckContent(observation.Content);
                 CheckEmbedding(observation.Embedding);
-                var id = CreateId("mem_");
+                var id = memoryIds is null ? CreateId("mem_") : memoryIds[index];
                 InsertMemory(db, tx, id, 0, observation.Content, sourceId, now, 0, observation.Model, $"source:{sourceId}:{index}");
                 ExecuteNonQuery(db, tx, "INSERT INTO memory_roots(memory_id,source_id) VALUES($id,$src)", ("$id", id), ("$src", sourceId));
                 ExecuteNonQuery(db, tx, "UPDATE memories SET sealed=1 WHERE id=$id", ("$id", id));

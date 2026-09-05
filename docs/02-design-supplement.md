@@ -189,7 +189,11 @@ Daily Dream의 seed는 다음으로 제한한다.
 
 오늘 생성된 depth-0 Memory와 오늘 recall된 모든 depth의 Memory에서 시작하는 제한된 작업 범위로 불필요한 반복 생성을 줄인다.
 
-그럼에도 depth > 0에서 비슷하거나 중복된 abstraction이 생길 수 있다. 초기에는 이를 허용하고 관찰한다. 중복 abstraction을 막기 위한 별도의 semantic 병합·제거 정책을 지금 도입하지 않는다.
+각 seed에서 만든 consolidation neighborhood는 Memory ID 집합으로 식별한다. 같은 Dream run 안에서 ID 집합이 정확히 같은 neighborhood는 한 번만 LLM으로 처리하며, ID를 ordinal 정렬한 순서로 전달한다. 순서만 다르고 구성원이 같은 집합은 하나로 취급한다. 구성원이 하나라도 다르면 별도 neighborhood이며 Jaccard, overlap 비율, embedding threshold 같은 유사도 판정은 사용하지 않는다. 저장된 proposal에서 canonical 집합을 복원하므로 run 재개 후에도 이미 처리한 neighborhood를 다시 호출하지 않는다.
+
+Daily Dream은 neighborhood 하나에서 abstraction을 `0..1`개만 만든다. 여러 부모를 함께 볼 때 새로 드러나는 반복 패턴, 공통 조건, 의미 있는 차이, 예외 또는 경계 조건이 없으면 만들지 않는다. 부모의 단순 요약·재서술·더 일반적인 표현과 미래 assistant 행동 지침은 Memory로 만들지 않는다. 이 제한은 Weekly Meditation에 적용하지 않는다.
+
+구성원이 조금 다른 neighborhood나 서로 다른 Dream run에서 의미상 비슷한 abstraction이 생길 가능성은 남는다. 별도의 semantic 병합·제거 정책은 도입하지 않는다.
 
 Recall 사실 자체가 evidence가 되거나 retrieval ranking을 강화하지 않는다는 규칙은 그대로 유지한다.
 

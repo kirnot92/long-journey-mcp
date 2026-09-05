@@ -1,6 +1,6 @@
 # Long Journey MCP
 
-C#/.NET 10으로 구현한 공유 기억 서버다. 원문 Source를 Markdown으로 보존하고, SQLite에 기억·단방향 관계·provenance를 쌓는다. 현재 구현 범위는 Phase 1~4(Core, Daily Dream, Weekly Meditation, Inspection)다. Benchmark는 이후 단계다.
+C#/.NET 10으로 구현한 공유 기억 서버다. 원문 Source를 Markdown으로 보존하고, SQLite에 기억·단방향 관계·provenance를 쌓는다. 현재 구현 범위는 Phase 1~4(Core, Daily Dream, Weekly Meditation, Inspection)와 [LongMemEval-S consolidation benchmark](docs/10-benchmark.md)다.
 
 ## 실행
 

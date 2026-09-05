@@ -90,6 +90,8 @@ Recall은 lexical/embedding 후보를 결합하고 Responses API로 후보 중 I
 
 Daily Dream은 해당 날짜에 생성된 모든 depth 0 기억과 해당 날짜에 recall된 모든 depth의 기억의 합집합에서 시작한다. seed의 outgoing relation과 semantic 이웃까지 탐색할 수 있다. 생성만 된 depth > 0은 그 이유만으로 seed가 되지 않는다. 새 observation의 assimilation과 seed neighborhood의 consolidation을 처리하며 일일 금액 제한은 없다.
 
+같은 Dream run에서 Memory ID 집합이 정확히 같은 consolidation neighborhood는 한 번만 LLM으로 처리한다. ID를 ordinal 정렬해 입력 순서와 canonical key를 고정하며, 일부만 겹치는 집합을 유사도 heuristic으로 합치지는 않는다. Neighborhood당 Dream abstraction은 `0..1`개다. 여러 부모를 함께 보아야 드러나는 패턴·조건·차이·예외가 없으면 빈 결과를 허용하고, 단순 요약·재서술·일반화나 미래 assistant 행동 지침은 만들지 않는다. 이 정책은 Meditation에는 적용되지 않는다.
+
 주간 구간은 최초 corpus 활동 날짜를 기준으로 7일씩 이어진다. 특정 요일에 고정한 달력 주가 아니며, 각 일일 구간 처리가 끝난 뒤 그에 대응하는 7일 구간이 완성되면 Meditation을 실행한다. 서버가 며칠 꺼졌다면 놓친 날짜와 주간 구간을 차례로 따라잡는다. 미설정 budget 때문에 주간 구간을 버리거나 완료로 표시하지 않는다. 이때 budget을 나중에 설정하면 밀린 여러 주가 각각 N달러의 별도 budget으로 실행될 수 있다.
 
 Meditation은 구간 안에서 생성된 depth >= 1 기억과, 그 기간에 outgoing relation이 추가된 depth >= 1 기억을 결정적으로 수집한다. Relation target이 depth 0이어도 owner가 depth >= 1이면 포함한다. 수집한 모든 후보와 기존 이월 작업의 처리 순서는 설정된 Meditation LLM이 한 번의 priority 판단으로 결정한다. 각 후보의 내용과 outgoing relation의 종류·추가 시각·대상 내용을 전달하며, negative relation 수나 최근 변경 시각으로 정렬하지 않는다. Priority 후보에는 Recall/graph 탐색 개수 제한을 적용하지 않는다. 개별 작업에서는 기존처럼 더 넓은 그래프, depth 0, raw Source를 확인할 수 있다.
@@ -100,7 +102,7 @@ Priority 결과는 모든 작업 키를 정확히 한 번씩 포함해야 한다
 
 Priority 호출도 현재 run의 budget에 비용을 예약하고 정산한다. 예약이 거절되면 미처리 queue 저장과 run의 `budget_exhausted` 전환을 하나의 트랜잭션으로 처리해 다음 주로 이월한다. 순서가 확정되지 않은 작업을 기본 정렬로 처리하지 않는다. API 실패나 누락·중복·알 수 없는 작업 키가 있는 응답은 실패로 처리하고, 다음 재시도에서 미초기화 run의 priority를 다시 판단한다. 알려진 사용량은 정산하고 불명확한 사용량의 예약은 유지하는 기존 비용 규칙을 따른다.
 
-각 Dream/Meditation은 시작 시 graph sequence 상한과 revision을 고정한다. 실행 중 생성된 기억·relation·recall을 같은 실행의 재료로 재사용하지 않는다. 반환된 proposal은 저장한 뒤 Core validation을 통해 적용한다. 중단 후 재시도는 저장된 proposal과 작업 키로 중복 적용을 방지한다. 서로 다른 run이 생성한 의미상 유사 abstraction은 자동 병합하지 않는다.
+각 Dream/Meditation은 시작 시 graph sequence 상한과 revision을 고정한다. 실행 중 생성된 기억·relation·recall을 같은 실행의 재료로 재사용하지 않는다. 반환된 proposal은 저장한 뒤 Core validation을 통해 적용한다. 중단 후 재시도는 저장된 proposal과 작업 키로 중복 적용을 방지하며, Dream은 저장된 neighborhood ID 집합도 복원해 같은 run의 중복 LLM 호출을 막는다. 서로 다른 run이 생성한 의미상 유사 abstraction은 자동 병합하지 않는다.
 
 ## API 비용과 오류
 

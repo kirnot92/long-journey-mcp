@@ -3,7 +3,8 @@ namespace LongJourney.Core;
 public sealed class MemorySearch(
     IMemoryStore store,
     ICognition cognition,
-    EngineOptions options) : IMemorySearch
+    EngineOptions options,
+    Action<SearchCandidateTrace>? traceCandidates = null) : IMemorySearch
 {
     private readonly SemaphoreSlim embeddingGenerationGate = new(1, 1);
 
@@ -35,7 +36,17 @@ public sealed class MemorySearch(
         var candidatesById = depth is null ? snapshot.ById : BuildCandidateIndex(candidates);
         var lexicalRanking = ReadLexicalRanking(query, candidatesById, snapshot, depth, resultLimit);
         var semanticRanking = RankBySimilarity(queryVector, embeddings, candidatesById, resultLimit);
-        return MergeRankings(lexicalRanking, semanticRanking, candidatesById, resultLimit);
+        var results = MergeRankings(lexicalRanking, semanticRanking, candidatesById, resultLimit);
+        if (traceCandidates is not null)
+        {
+            var fusedIds = new List<string>(results.Count);
+            foreach (var memory in results)
+            {
+                fusedIds.Add(memory.Id);
+            }
+            traceCandidates(new SearchCandidateTrace(lexicalRanking, semanticRanking, fusedIds));
+        }
+        return results;
     }
 
     public async Task<IReadOnlyList<MemoryRecord>> NearestAsync(

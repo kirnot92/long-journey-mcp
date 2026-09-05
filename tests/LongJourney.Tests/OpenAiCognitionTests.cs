@@ -127,7 +127,7 @@ public sealed partial class OpenAiCognitionTests
     }
 
     [Fact]
-    public async Task AssimilationAcceptsOnlyExistingOwnerToObservationDirection()
+    public async Task AssimilationLeavesSemanticRelationValidationToCore()
     {
         var ledger = new Ledger();
         using var http = new HttpClient(new Handler(_ => Task.FromResult(Response("""
@@ -139,7 +139,9 @@ public sealed partial class OpenAiCognitionTests
         using var reversed = new HttpClient(new Handler(_ => Task.FromResult(Response("""
             {"relations":[{"memory_id":"new","related_memory_id":"existing","kind":"negative"}]}
             """))));
-        await Assert.ThrowsAsync<InvalidDataException>(() => Client(reversed, ledger).AssimilateAsync(Memory("new"), [Memory("existing", 1)], new(1), default));
+        var invalid = await Client(reversed, ledger).AssimilateAsync(
+            Memory("new"), [Memory("existing", 1)], new(1), default);
+        Assert.Equal(new RelationProposal("new", "existing", RelationKind.Negative), Assert.Single(invalid.Value));
         Assert.Equal(2, ledger.Completed.Count);
     }
 
@@ -162,6 +164,67 @@ public sealed partial class OpenAiCognitionTests
         Assert.Equal("gpt-5.6-sol", result.Model);
         Assert.Equal(["a", "b", "c"], Assert.Single(result.Value).DerivedFrom);
         Assert.Equal("meditation", Assert.Single(ledger.Reservations).Operation);
+    }
+
+    [Fact]
+    public async Task AbstractionLeavesSemanticParentValidationToCore()
+    {
+        var ledger = new Ledger();
+        using var http = new HttpClient(new Handler(_ => Task.FromResult(Response("""
+            {"abstractions":[
+              {"content":"Invalid parent proposal.","derived_from":["a","a","unknown"]},
+              {"content":"Valid sibling.","derived_from":["a","b","c"]}
+            ]}
+            """))));
+
+        var result = await Client(http, ledger).AbstractAsync(
+            [Memory("a"), Memory("b"), Memory("c")], [], CognitionRole.Meditation, new(9), default);
+
+        Assert.Equal(2, result.Value.Count);
+        Assert.Equal(["a", "a", "unknown"], result.Value[0].DerivedFrom);
+        Assert.Equal(["a", "b", "c"], result.Value[1].DerivedFrom);
+        Assert.Single(ledger.Completed);
+    }
+
+    [Fact]
+    public async Task DreamAbstractionSchemaAndPromptAreConservativeWhileMeditationRemainsMultiOutput()
+    {
+        var ledger = new Ledger();
+        var requests = new List<(int MaximumItems, string Instructions)>();
+        using var http = new HttpClient(new Handler(async request =>
+        {
+            using var body = JsonDocument.Parse(await request.Content!.ReadAsStringAsync());
+            var maximumItems = body.RootElement
+                .GetProperty("text").GetProperty("format").GetProperty("schema")
+                .GetProperty("properties").GetProperty("abstractions")
+                .GetProperty("maxItems").GetInt32();
+            requests.Add((maximumItems, body.RootElement.GetProperty("instructions").GetString()!));
+            return requests.Count == 1
+                ? Response("""{"abstractions":[]}""")
+                : Response("""
+                    {"abstractions":[
+                      {"content":"First wider pattern.","derived_from":["a","b","c"]},
+                      {"content":"Second wider pattern.","derived_from":["a","b","c"]}
+                    ]}
+                    """);
+        }));
+        var client = Client(http, ledger);
+        var memories = new[] { Memory("a"), Memory("b"), Memory("c") };
+
+        var dream = await client.AbstractAsync(
+            memories, [], CognitionRole.Dream, new(1), default);
+        var meditation = await client.AbstractAsync(
+            memories, [], CognitionRole.Meditation, new(2), default);
+
+        Assert.Empty(dream.Value);
+        Assert.Equal(2, meditation.Value.Count);
+        Assert.Equal(1, requests[0].MaximumItems);
+        Assert.Contains("parents together reveal a new repeated pattern", requests[0].Instructions);
+        Assert.Contains("Do not create an abstraction when it would only summarize, restate", requests[0].Instructions);
+        Assert.Contains("Never write future assistant behavior", requests[0].Instructions);
+        Assert.Equal(new EngineOptions().NeighborhoodSize, requests[1].MaximumItems);
+        Assert.Contains("Multiple overlapping parent subsets are allowed", requests[1].Instructions);
+        Assert.DoesNotContain("Never write future assistant behavior", requests[1].Instructions);
     }
 
     [Fact]

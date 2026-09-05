@@ -76,10 +76,36 @@ public sealed partial class ConsolidationTests
 
         var result = await fixture.Engine.DreamAsync(start, start.AddDays(1));
 
-        Assert.Equal(6, result.RejectedProposals);
+        Assert.Equal(4, result.RejectedProposals);
         Assert.Equal(0, fixture.Cognition.EmbeddingCalls);
         Assert.All(fixture.Store.ReadSnapshot().Memories, x => Assert.Empty(x.Relations));
         Assert.Equal(3, fixture.Store.ReadSnapshot().Memories.Count);
+    }
+
+    [Fact]
+    public async Task DuplicateAssimilationRelationsAreRejectedIndividually()
+    {
+        using var fixture = new ConsolidationFixture();
+        var start = fixture.Clock.Now.AddDays(-1);
+        fixture.Observations(2, start.AddDays(-2));
+        var fresh = fixture.Observations(1, start.AddHours(1))[0];
+        string? ownerId = null;
+        fixture.Cognition.Assimilate = (_, candidates) =>
+        {
+            ownerId = candidates[0].Id;
+            return
+            [
+                new RelationProposal(ownerId, fresh.Id, RelationKind.Positive),
+                new RelationProposal(ownerId, fresh.Id, RelationKind.Positive)
+            ];
+        };
+
+        var result = await fixture.Engine.DreamAsync(start, start.AddDays(1));
+
+        Assert.Equal("complete", result.Status);
+        Assert.Equal(1, result.RejectedProposals);
+        Assert.NotNull(ownerId);
+        Assert.Single(fixture.Store.GetMemory(ownerId)!.Relations);
     }
 
     [Fact]
@@ -104,7 +130,87 @@ public sealed partial class ConsolidationTests
     }
 
     [Fact]
-    public async Task SavedProposalsResumeAfterPartialApplicationWithoutRepeatingReasoningOrMemories()
+    public async Task ExactDreamNeighborhoodIsProcessedOnceInOrdinalOrder()
+    {
+        using var fixture = new ConsolidationFixture();
+        var start = fixture.Clock.Now.AddDays(-1);
+        var observations = fixture.Observations(3, start.AddHours(1));
+        fixture.Cognition.Abstract = (neighborhood, _, role) =>
+        {
+            Assert.Equal(CognitionRole.Dream, role);
+            return [new AbstractionProposal(
+                "A bounded pattern shared by these experiences.",
+                MemoryTestData.Ids(neighborhood))];
+        };
+
+        var result = await fixture.Engine.DreamAsync(start, start.AddDays(1));
+
+        Assert.Equal("complete", result.Status);
+        var neighborhood = Assert.Single(fixture.Cognition.Neighborhoods);
+        var actualIds = MemoryTestData.Ids(neighborhood);
+        var expectedIds = MemoryTestData.Ids(observations);
+        expectedIds.Sort(StringComparer.Ordinal);
+        Assert.Equal(expectedIds, actualIds);
+        Assert.Equal(1, fixture.Cognition.EmbeddingCalls);
+        Assert.Single(fixture.Store.ReadSnapshot().Memories, memory => memory.Depth == 1);
+        var consolidationWork = fixture.Store.GetWorkItems(result.RunId)
+            .Where(item => item.Phase == "consolidation").ToList();
+        Assert.Equal(3, consolidationWork.Count);
+        Assert.All(consolidationWork, item => Assert.Equal("complete", item.Status));
+        Assert.Equal(2, consolidationWork.Count(item =>
+            item.Model == "dream-neighborhood-deduplicated"));
+    }
+
+    [Fact]
+    public async Task AlmostEqualDreamNeighborhoodsAreNotDeduplicated()
+    {
+        using var fixture = new ConsolidationFixture();
+        var start = fixture.Clock.Now.AddDays(-1);
+        var observations = fixture.Observations(4, start.AddHours(1));
+        fixture.Search.Nearest = (seed, _) => seed.Id switch
+        {
+            var id when id == observations[0].Id => [observations[1], observations[2]],
+            var id when id == observations[1].Id => [observations[0], observations[3]],
+            var id when id == observations[2].Id => [observations[0], observations[1]],
+            _ => [observations[0], observations[1]]
+        };
+
+        var result = await fixture.Engine.DreamAsync(start, start.AddDays(1));
+
+        Assert.Equal("complete", result.Status);
+        Assert.Equal(2, fixture.Cognition.Neighborhoods.Count);
+        var sets = fixture.Cognition.Neighborhoods
+            .Select(neighborhood => MemoryTestData.Ids(neighborhood).Order(StringComparer.Ordinal).ToArray())
+            .ToList();
+        Assert.Contains(sets, ids => ids.SequenceEqual(
+            new[] { observations[0].Id, observations[1].Id, observations[2].Id }
+                .Order(StringComparer.Ordinal)));
+        Assert.Contains(sets, ids => ids.SequenceEqual(
+            new[] { observations[0].Id, observations[1].Id, observations[3].Id }
+                .Order(StringComparer.Ordinal)));
+    }
+
+    [Fact]
+    public async Task SameDreamNeighborhoodCanBeProcessedAgainInNextRun()
+    {
+        using var fixture = new ConsolidationFixture();
+        var start = fixture.Clock.Now.AddDays(-1);
+        var observations = fixture.Observations(3, start.AddHours(1));
+
+        var first = await fixture.Engine.DreamAsync(start, start.AddDays(1));
+        fixture.Store.RecordRecall(MemoryTestData.Ids(observations), start.AddDays(1).AddHours(1));
+        var second = await fixture.Engine.DreamAsync(start.AddDays(1), start.AddDays(2));
+
+        Assert.Equal("complete", first.Status);
+        Assert.Equal("complete", second.Status);
+        Assert.Equal(2, fixture.Cognition.Neighborhoods.Count);
+        Assert.Equal(
+            MemoryTestData.Ids(fixture.Cognition.Neighborhoods[0]),
+            MemoryTestData.Ids(fixture.Cognition.Neighborhoods[1]));
+    }
+
+    [Fact]
+    public async Task SavedDreamProposalResumesThenSuppressesDuplicateWorkWithoutRepeatingReasoning()
     {
         using var fixture = new ConsolidationFixture();
         var start = fixture.Clock.Now.AddDays(-1);
@@ -114,43 +220,113 @@ public sealed partial class ConsolidationTests
         fixture.Cognition.Abstract = (_, _, _) =>
         {
             abstractCalls++;
-            if (abstractCalls == 1)
-            {
-                return
-                [
-                    new AbstractionProposal("First possible pattern", parents),
-                    new AbstractionProposal("Second possible pattern", parents)
-                ];
-            }
-
-            return [];
+            return [new AbstractionProposal("First possible pattern", parents)];
         };
-        var embeds = 0;
-        fixture.Cognition.Embedding = (_, _) =>
-        {
-            embeds++;
-            if (embeds == 2)
-            {
-                throw new IOException("simulated crash");
-            }
+        fixture.Cognition.Embedding = (_, _) => throw new IOException("simulated crash");
 
-            return ConsolidationFixture.Vector;
-        };
-
-        await Assert.ThrowsAsync<IOException>(() => fixture.Engine.DreamAsync(start, start.AddDays(1)));
+        await Assert.ThrowsAsync<IOException>(() =>
+            fixture.Engine.DreamAsync(start, start.AddDays(1)));
         var interrupted = Assert.Single(fixture.Store.GetRuns());
         Assert.Equal("running", interrupted.Status);
-        Assert.Single(fixture.Store.ReadSnapshot().Memories, x => x.Depth == 1);
-        Assert.Contains(fixture.Store.GetWorkItems(interrupted.Id), x => x.Status == "pending" && x.ProposalJson is not null);
+        Assert.Contains(fixture.Store.GetWorkItems(interrupted.Id), item =>
+            item.Status == "pending" && item.ProposalJson is not null);
 
         fixture.Cognition.Embedding = (_, _) => ConsolidationFixture.Vector;
         var resumed = await fixture.Engine.DreamAsync(start, start.AddDays(1));
+
         Assert.Equal("complete", resumed.Status);
-        Assert.Equal(3, abstractCalls);
-        Assert.Equal(2, MemoryTestData.CountAtDepth(fixture.Store.ReadSnapshot().Memories, 1));
+        Assert.Equal(1, abstractCalls);
+        Assert.Single(fixture.Store.ReadSnapshot().Memories, memory => memory.Depth == 1);
+        var work = fixture.Store.GetWorkItems(resumed.RunId);
+        Assert.All(work, item => Assert.Equal("complete", item.Status));
+        Assert.Equal(2, work.Count(item =>
+            item.Phase == "consolidation" && item.Model == "dream-neighborhood-deduplicated"));
         var callsBeforeTerminalRetry = fixture.Cognition.Calls.Count;
         await fixture.Engine.DreamAsync(start, start.AddDays(1));
         Assert.Equal(callsBeforeTerminalRetry, fixture.Cognition.Calls.Count);
+    }
+
+    [Theory]
+    [InlineData(false, 0)]
+    [InlineData(true, 1)]
+    public async Task EmptyOrInvalidFirstDreamProposalStillSuppressesDuplicateWork(
+        bool invalid, int expectedRejections)
+    {
+        using var fixture = new ConsolidationFixture();
+        var start = fixture.Clock.Now.AddDays(-1);
+        var observations = fixture.Observations(3, start.AddHours(1));
+        var calls = 0;
+        fixture.Cognition.Abstract = (_, _, _) =>
+        {
+            calls++;
+            return invalid
+                ? [new AbstractionProposal(
+                    "Invalid duplicate evidence.",
+                    [observations[0].Id, observations[0].Id, observations[1].Id])]
+                : [];
+        };
+
+        var result = await fixture.Engine.DreamAsync(start, start.AddDays(1));
+
+        Assert.Equal("complete", result.Status);
+        Assert.Equal(1, calls);
+        Assert.Equal(expectedRejections, result.RejectedProposals);
+        Assert.Equal(0, fixture.Cognition.EmbeddingCalls);
+        Assert.DoesNotContain(fixture.Store.ReadSnapshot().Memories, memory => memory.Depth > 0);
+    }
+
+    [Fact]
+    public async Task DreamAppliesOnlyFirstReturnedAbstractionAndRejectsExtraIndividually()
+    {
+        using var fixture = new ConsolidationFixture();
+        var start = fixture.Clock.Now.AddDays(-1);
+        var observations = fixture.Observations(3, start.AddHours(1));
+        var parents = MemoryTestData.Ids(observations);
+        fixture.Cognition.Abstract = (_, _, _) =>
+        [
+            new AbstractionProposal("First bounded pattern.", parents),
+            new AbstractionProposal("Second bounded pattern.", parents)
+        ];
+
+        var result = await fixture.Engine.DreamAsync(start, start.AddDays(1));
+
+        Assert.Equal("complete", result.Status);
+        Assert.Equal(1, result.RejectedProposals);
+        Assert.Equal(1, fixture.Cognition.EmbeddingCalls);
+        Assert.Single(fixture.Store.ReadSnapshot().Memories, memory => memory.Depth == 1);
+    }
+
+    [Fact]
+    public async Task DreamLeavesAlreadyAppliedLegacyExtraOutputUntouched()
+    {
+        using var fixture = new ConsolidationFixture();
+        var start = fixture.Clock.Now.AddDays(-1);
+        var observations = fixture.Observations(3, start.AddHours(1));
+        var parentIds = MemoryTestData.Ids(observations);
+        var run = fixture.Store.GetOrCreateRun(
+            RunKind.Dream, start, start.AddDays(1), fixture.Clock.Now, null);
+        var workKey = $"abstract:{observations[0].Id}";
+        fixture.Store.EnsureWorkItems(run.Id,
+            [new WorkSeed(workKey, "consolidation", observations[0].Id, 0)]);
+        var first = new AbstractionProposal("First legacy pattern.", parentIds);
+        var second = new AbstractionProposal("Second legacy pattern.", parentIds);
+        var proposalJson = System.Text.Json.JsonSerializer.Serialize(new
+        {
+            allowed_candidate_ids = parentIds,
+            relations = Array.Empty<RelationProposal>(),
+            abstractions = new[] { first, second }
+        }, JsonDefaults.Options);
+        fixture.Store.SaveWorkProposal(run.Id, workKey, proposalJson, "legacy-model");
+        fixture.Store.AddAbstraction(
+            second, "legacy-model", run, workKey, 1, parentIds,
+            ConsolidationFixture.Vector, fixture.Clock.Now);
+
+        var result = await fixture.Engine.DreamAsync(start, start.AddDays(1));
+
+        Assert.Equal("complete", result.Status);
+        Assert.Equal(0, result.RejectedProposals);
+        Assert.Equal(1, fixture.Cognition.EmbeddingCalls);
+        Assert.Equal(2, MemoryTestData.CountAtDepth(fixture.Store.ReadSnapshot().Memories, 1));
     }
 
     [Fact]

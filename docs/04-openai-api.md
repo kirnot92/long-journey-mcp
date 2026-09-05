@@ -65,7 +65,7 @@ LLM 호출 결과 중 구조화된 결과가 필요한 작업은 가능한 한 J
 - `remember`: `0..N` observation proposal
 - `recall`: 선택된 Memory ID 목록과 필요한 반환 정보
 - Dream Assimilation: positive / negative / unrelated 판단
-- Dream Consolidation: abstraction proposal과 `derived_from`
+- Dream Consolidation: exact-ID neighborhood당 `0..1` abstraction proposal과 `derived_from`
 - Meditation: reasoning 결과에서 생성할 새로운 Memory proposal
 
 LLM은 DB를 직접 수정하지 않는다.

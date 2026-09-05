@@ -196,7 +196,8 @@ public sealed partial class DailyReportService
         text.AppendLine();
         text.AppendLine($"Time zone: {Escape(Text(report, "time_zone_id"))}. Coverage: **{Escape(Text(report["coverage"]!.AsObject(), "status"))}**. {(Boolean(report, "provisional") == true ? "**Provisional day.**" : "Closed day; late completions and settlements may update this report.")}");
         text.AppendLine();
-        text.AppendLine($"[Complete ordered activity, memory, provenance, source and cost details]({date}.json). Original raw remains in the Source archive. Remember/Recall counts use invocation start date; costs use API start date; relation outcomes use application date. Dream target periods are listed separately in JSON.");
+        text.AppendLine($"[Complete ordered activity, memory, provenance, source and cost details]({date}.json). Original raw remains in the Source archive. Remember/Recall/Think counts use invocation start date; costs use API start date; relation outcomes use application date. Dream target periods are listed separately in JSON.");
+        text.AppendLine("Recall / Think totals share the recall activity kind. JSON operations retain details.tool, query/context and ordered candidate/returned IDs for comparing the two tools; a missing tool field means the distinction was not recorded.");
         text.AppendLine();
         text.AppendLine("| Metric | Value |");
         text.AppendLine("| --- | ---: |");
@@ -212,8 +213,8 @@ public sealed partial class DailyReportService
         Metric("Extraction attempts", remember, "extraction_attempts");
         Metric("Zero-observation completed extractions", remember, "zero_observation_extractions");
         Metric("Recovery extraction attempts", remember, "recovery_extraction_attempts");
-        Metric("Recall calls", recall, "calls");
-        Metric("Completed empty Recall results", recall, "empty_completed_results");
+        Metric("Recall / Think calls", recall, "calls");
+        Metric("Completed empty Recall / Think results", recall, "empty_completed_results");
         Metric("Returned D0 total", recall, "returned_d0_total");
         Metric("Returned D0 distinct", recall, "returned_d0_distinct");
         Metric("Assimilation execution attempts", assimilation, "attempts");
@@ -238,7 +239,7 @@ public sealed partial class DailyReportService
         }
 
         text.AppendLine();
-        text.AppendLine($"States — Remember: {Compact(remember["states"])}; extraction: {Compact(remember["extraction_states"])}; Recall: {Compact(recall["states"])}; assimilation: {Compact(assimilation["states"])}.");
+        text.AppendLine($"States — Remember: {Compact(remember["states"])}; extraction: {Compact(remember["extraction_states"])}; Recall / Think: {Compact(recall["states"])}; assimilation: {Compact(assimilation["states"])}.");
         text.AppendLine();
         text.AppendLine($"Relation outcomes: {Compact(assimilation["outcomes"])}. Appended categories: {Compact(assimilation["appended_categories"])}. A saved proposal is counted once per run/work/index; repeated attempts do not change its first application outcome.");
         text.AppendLine();

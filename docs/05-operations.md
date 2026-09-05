@@ -87,7 +87,8 @@ OpenAI의 tool search에서 MCP 서버를 지연 로딩하면 모델은 먼저 �
 근거: [OpenAI tool search](https://developers.openai.com/api/docs/guides/tools-tool-search#use-namespaces-where-possible).
 
 Long Journey는 서버 설명에 공유 장기 기억의 역할과 검색·기록 시점을 요약하고,
-서버 사용 지침에 `recall`·`remember`·`trace`의 사용 흐름을 제공한다.
+서버 사용 지침에 `recall`·`think`·`remember`·`trace`의 사용 흐름을 제공한다.
+구체적인 경험을 찾는 `recall`과 축적된 관점·원칙을 찾는 `think`의 호출 시점을 구분한다.
 개별 도구 설명에는 raw 작성 규칙과 실제 설정 상한 등 호출에 필요한 세부사항을 유지한다.
 이는 도구 목록 조회 전에도 클라이언트가 사용 지침을 얻도록 하는 변경이며,
 모델이 지침을 읽거나 자동으로 기억 도구를 호출한다는 보장은 아니다.
@@ -99,7 +100,7 @@ MCP 초기화의 `serverInfo.description`과 별개다.
 근거: [OpenAI MCP 서버 연결](https://developers.openai.com/api/docs/guides/tools-connectors-mcp).
 설정용 설명은 다음처럼 작성할 수 있다.
 
-> Shared long-term memory across agents and sessions. Recall relevant preferences, constraints, decisions, and past outcomes; remember meaningful new preferences, decisions, outcomes, and corrections for future sessions; trace memories to their original evidence.
+> Shared long-term memory across agents and sessions. Use recall to find concrete experiences, preferences, constraints, decisions, and outcomes. Use think to search accumulated perspectives, principles, and patterns before choosing a direction or comparing alternatives. Remember meaningful new experiences and corrections for future sessions; trace memories to their original evidence.
 
 서버 수정 후에는 서버를 재시작하고 클라이언트를 재연결하거나 메타데이터를 새로 불러온다.
 HTTP 통합 테스트는 도구 목록 조회·호출 전 초기화 응답에 설명과 지침이 포함되는지 검증한다.
@@ -107,12 +108,13 @@ HTTP 통합 테스트는 도구 목록 조회·호출 전 초기화 응답에 �
 
 ## MCP 도구와 결과
 
-공개 도구는 정확히 다음 세 개다. 반환 객체는 JSON `snake_case` 이름의 structured content로 제공된다.
+공개 도구는 정확히 다음 네 개다. 반환 객체는 JSON `snake_case` 이름의 structured content로 제공된다.
 
 | 도구 | 입력 | 반환 |
 | --- | --- | --- |
 | `remember` | `raw` | `source_id`, `duplicate`, `memories`, `status` |
 | `recall` | `query`, 선택적 `context` | `memories` |
+| `think` | `topic` | `memories` |
 | `trace` | `memory_id` | `memory_id`, 부모를 포함한 `memories`, 원문이 포함된 `sources` |
 
 `remember`에는 호출 에이전트가 기억할 가치가 있다고 선택한 하나의 일관된 경험과 그 경험을 이해하는 데 필요한 맥락을 전달한다. 명시적인 선호·제약, 중요한 결정, 관찰된 결과, 정정·예외가 기록할 만큼 갖춰졌을 때 호출한다. 매 발화나 도구 실행마다 기록할 필요는 없다. 세션 종료·맥락 압축 전에는 아직 기록하지 않은 유용한 경험을 점검하되, 이미 갖춰진 중요한 경험의 기록을 그때까지 미루지는 않는다.
@@ -125,7 +127,18 @@ Source 생성 시각은 내부에서 기록하며 원문에 등장하는 사건�
 
 각 기억의 `relations`에는 `related_memory_id`, `kind`, `related_at`, `sequence`가 있다. `positive_related`/`negative_related`는 outgoing ID 목록이다. A→B 관계를 추가해도 B→A를 만들거나 조회하지 않는다. 동일 방향에서 positive와 negative는 별도로 존재할 수 있다. 재발견은 기존 `related_at`을 갱신하지 않는다. `trace`는 immutable `derived_from`으로 부모와 원문만 추적한다.
 
-Recall은 lexical/embedding 후보를 결합하고 Responses API로 후보 중 ID를 선택한다. Recall 기록은 다음 Dream의 seed에 활용하지만 별도의 증거·truth·confidence·retrieval boost로 변환하지 않는다.
+`recall`은 구체적인 사건·조건·결과에 맞는 경험을 찾을 때, `think`는 설계 방향이나 대안을 검토하며 축적된 철학·관점·원칙·패턴을 찾을 때 사용한다. 호출 에이전트가 검색 의도에 맞춰 `query` 또는 `topic`을 작성한다.
+
+| 검색 의도 | 입력 예시 |
+| --- | --- |
+| `recall`의 구체 경험 | 자동화된 배포에서 실패 원인을 추적하기 어려웠던 사례 |
+| `think`의 축적된 관점 | 자동화의 편의성과 실패 시 제어권에 관해 쌓인 관점 |
+
+두 도구는 같은 lexical/embedding 후보 검색과 Responses API의 ID 선택을 사용한다. `think(topic)`은 공통 검색에 `query=topic`, `context=null`을 전달하고, `recall`의 선택적 `context`는 기존처럼 후보 선택 단계에서 사용한다. 쿼리 재작성, depth 필터·가중치, 그래프 확장이나 추가 생성 단계는 없다. 같은 입력과 설정에는 같은 검색·선택 절차를 적용하지만, 별도 모델 호출의 선택 결과가 항상 같다는 보장은 없다. 어느 도구에서도 모든 depth의 기억을 반환할 수 있다.
+
+Think는 `OpenAI:Recall` 모델·추론 설정, `Engine:SearchCandidates`, `Engine:RecallLimit`, `Engine:MaxRawCharacters`를 공유한다. `topic`은 공백일 수 없으며 입력 상한은 기본 4,000 UTF-16 code unit이다. 반환 형식은 Recall과 같은 `memories`다.
+
+두 도구 모두 회수 시각과 recall event를 기록하므로 읽기 전용 호출은 아니다. 회수 기록은 다음 Dream의 seed에 활용하지만 별도의 증거·truth·confidence·retrieval boost로 변환하지 않는다. 호출 자체가 새 Source·Memory·관계를 생성하지 않는다. API 비용도 같은 검색·선택 경로에 기록한다. [Daily Report](14-daily-report.md)는 기존 recall 집계에 두 도구를 포함하고 상세 JSON의 `details.tool`로 호출을 구분한다.
 
 ## 일일·주간 작업
 
@@ -153,7 +166,7 @@ Priority 호출도 현재 run의 budget에 비용을 예약하고 정산한다. 
 
 모든 운영 reasoning은 OpenAI Responses API, embedding은 OpenAI Embeddings API를 직접 사용한다. 기본 endpoint는 `https://api.openai.com/v1/`이며 타 provider endpoint를 받지 않는다. 구조화 출력은 JSON Schema를 사용하고, 모델은 DB 대신 proposal만 반환한다. Responses 요청은 `service_tier=default`를 지정해 standard 단가 설정과 맞추며 계정의 fast tier를 자동 상속하지 않는다.
 
-호출 전에 보수적인 최대 비용을 예약하고 응답 token usage로 정산한다. 주간 예약은 남은 budget 안에서만 허용한다. 최대 출력·입력 추정 비용을 모두 예약할 여유가 없으면 실제 잔액이 남았더라도 다음 호출을 시작하지 않을 수 있다. 완료 여부나 usage가 불명확한 호출은 예약을 남겨 이중 소비를 방지한다. 일일/remember/recall 비용도 기록하지만 금액 한도를 적용하지 않는다.
+호출 전에 보수적인 최대 비용을 예약하고 응답 token usage로 정산한다. 주간 예약은 남은 budget 안에서만 허용한다. 최대 출력·입력 추정 비용을 모두 예약할 여유가 없으면 실제 잔액이 남았더라도 다음 호출을 시작하지 않을 수 있다. 완료 여부나 usage가 불명확한 호출은 예약을 남겨 이중 소비를 방지한다. 일일/remember/recall/think 비용도 기록하지만 금액 한도를 적용하지 않는다.
 
 각 역할 `ModelOptions`의 `InputUsdPerMillion`, `CachedInputUsdPerMillion`, `CacheWriteUsdPerMillion`, `OutputUsdPerMillion`, `LongContextThresholdTokens`, `LongContextInputMultiplier`, `LongContextOutputMultiplier`와 `OpenAI:EmbeddingInputUsdPerMillion`은 변경 가능하다. cached input·cache write·긴 context 추가 요금을 구분한다. 이는 설정 단가에 기반한 로컬 비용 장부이며 실제 청구 금액의 확정 자료가 아니다. 모델 또는 API 요금 변경 시 해당 값도 함께 검토한다.
 
@@ -163,7 +176,7 @@ Key가 없어도 서버와 로컬 trace는 사용할 수 있지만 cognitive API
 
 ## Embedding 교체와 백업
 
-Embedding은 모델 ID와 차원으로 space를 구분해 저장한다. 설정을 바꾸면 새 space로 검색하며 빠진 embedding은 필요 시 생성한다. 원문과 기존 Memory는 그대로 두고 미리 전체 재색인하려면 서버를 종료한 후 같은 데이터 폴더로 아래 내부 명령을 실행한다. 이 명령은 미완료 Source도 먼저 재시도한다. 실제 API 비용이 발생하며 네 번째 MCP 도구로 노출하지 않는다.
+Embedding은 모델 ID와 차원으로 space를 구분해 저장한다. 설정을 바꾸면 새 space로 검색하며 빠진 embedding은 필요 시 생성한다. 원문과 기존 Memory는 그대로 두고 미리 전체 재색인하려면 서버를 종료한 후 같은 데이터 폴더로 아래 내부 명령을 실행한다. 이 명령은 미완료 Source도 먼저 재시도한다. 실제 API 비용이 발생하며 MCP 도구로 노출하지 않는다.
 
 ```powershell
 dotnet run --project src/LongJourney.Server -- --reindex --Engine:DataDirectory=D:/LongJourneyData

@@ -121,7 +121,7 @@ dotnet test LongJourney.slnx --configuration Release --no-restore
 
 | 위치 | 책임 |
 | --- | --- |
-| MemoryEngine | remember·recall·trace의 처리 순서 |
+| MemoryEngine | remember·recall·think·trace의 처리 순서 |
 | MemorySearch | 임베딩 준비, 키워드·벡터 검색, 순위 병합 |
 | ConsolidationEngine / MemoryScheduler | 근거 선택, 제안 보존·적용, 실행 기간과 재시도 |
 | SqliteMemoryStore / SourceArchive / SqliteSchema | 쓰기 트랜잭션, 불변 원문, DB 제약 |

@@ -14,7 +14,7 @@ namespace LongJourney.Tests;
 public sealed partial class ServerTests
 {
     [Fact]
-    public async Task HttpMcpExposesOnlyThreeToolsAndPersistsSharedMemoryWithSnakeCaseResults()
+    public async Task HttpMcpExposesOnlyFourToolsAndPersistsSharedMemoryWithSnakeCaseResults()
     {
         await using var host = await RunningHost.StartAsync();
         var initialized = await host.RpcAsync("initialize", new
@@ -43,7 +43,7 @@ public sealed partial class ServerTests
         }
 
         toolNames.Sort();
-        Assert.Equal(new[] { "recall", "remember", "trace" }, toolNames);
+        Assert.Equal(new[] { "recall", "remember", "think", "trace" }, toolNames);
         var rememberTool = Assert.Single(tools, tool => tool.GetProperty("name").GetString() == "remember");
         var rememberProperties = new List<string>();
         foreach (var property in rememberTool.GetProperty("inputSchema").GetProperty("properties").EnumerateObject())
@@ -54,6 +54,23 @@ public sealed partial class ServerTests
         Assert.Equal(new[] { "raw" }, rememberProperties);
         Assert.False(rememberTool.GetProperty("annotations").GetProperty("destructiveHint").GetBoolean());
         Assert.True(rememberTool.GetProperty("annotations").GetProperty("openWorldHint").GetBoolean());
+        var recallTool = Assert.Single(tools, tool => tool.GetProperty("name").GetString() == "recall");
+        Assert.Contains("concrete experiences", recallTool.GetProperty("description").GetString(), StringComparison.OrdinalIgnoreCase);
+        var thinkTool = Assert.Single(tools, tool => tool.GetProperty("name").GetString() == "think");
+        var thinkSchema = thinkTool.GetProperty("inputSchema");
+        Assert.Equal("topic", Assert.Single(thinkSchema.GetProperty("properties").EnumerateObject()).Name);
+        Assert.Equal("string", thinkSchema.GetProperty("properties").GetProperty("topic").GetProperty("type").GetString());
+        Assert.Equal("topic", Assert.Single(thinkSchema.GetProperty("required").EnumerateArray()).GetString());
+        Assert.Contains("accumulated philosophy", thinkTool.GetProperty("description").GetString());
+        Assert.Equal(recallTool.GetProperty("outputSchema").GetRawText(), thinkTool.GetProperty("outputSchema").GetRawText());
+        foreach (var searchTool in new[] { recallTool, thinkTool })
+        {
+            var annotations = searchTool.GetProperty("annotations");
+            Assert.False(annotations.TryGetProperty("readOnlyHint", out var readOnly) && readOnly.GetBoolean());
+            Assert.False(annotations.GetProperty("destructiveHint").GetBoolean());
+            Assert.True(annotations.GetProperty("openWorldHint").GetBoolean());
+        }
+
         var traceTool = Assert.Single(tools, tool => tool.GetProperty("name").GetString() == "trace");
         Assert.True(traceTool.GetProperty("inputSchema").GetProperty("properties").TryGetProperty("memory_id", out _));
         Assert.True(traceTool.GetProperty("annotations").GetProperty("readOnlyHint").GetBoolean());
@@ -100,6 +117,19 @@ public sealed partial class ServerTests
         }));
         Assert.Equal(memoryId, recalled.GetProperty("memories")[0].GetProperty("id").GetString());
         Assert.NotEqual(JsonValueKind.Null, recalled.GetProperty("memories")[0].GetProperty("last_recalled_at").ValueKind);
+        var thought = Structured(await host.RpcAsync("tools/call", new
+        {
+            name = "think",
+            arguments = new
+            {
+                topic = "기억 서버의 설계 원칙"
+            }
+        }));
+        var thoughtMemory = Assert.Single(thought.GetProperty("memories").EnumerateArray());
+        Assert.Equal(memoryId, thoughtMemory.GetProperty("id").GetString());
+        Assert.Equal(0, thoughtMemory.GetProperty("depth").GetInt32());
+        Assert.NotEqual(JsonValueKind.Null, thoughtMemory.GetProperty("last_recalled_at").ValueKind);
+
         var traced = Structured(await host.RpcAsync("tools/call", new
         {
             name = "trace",

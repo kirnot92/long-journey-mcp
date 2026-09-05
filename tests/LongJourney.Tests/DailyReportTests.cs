@@ -36,7 +36,7 @@ public sealed class DailyReportTests
     }
 
     [Fact]
-    public void ReportLinksRawObservationsOrderedRecallAndAtomicRelationResults()
+    public void ReportLinksRawObservationsOrderedRecallAndThinkAndAtomicRelationResults()
     {
         using var fixture = new Fixture();
         var raw = "한글🙂\nraw | <tag>";
@@ -50,9 +50,9 @@ public sealed class DailyReportTests
         fixture.Operation("duplicate", "remember", "agent", "2026-09-04T02:00:00Z", "complete",
             new { raw_characters = raw.Length, raw_bytes = Encoding.UTF8.GetByteCount(raw), new_source = false, returned_ids = new[] { "d0a", "d0b" } }, "source");
         fixture.Operation("recall1", "recall", "agent", "2026-09-04T03:00:00Z", "complete",
-            new { query = "| <query>\n", context = "context", candidate_ids = new[] { "d0b", "d0a" }, returned_ids = new[] { "d0a", "d0b" } });
+            new { tool = "recall", query = "| <query>\n", context = "context", candidate_ids = new[] { "d0b", "d0a" }, returned_ids = new[] { "d0a", "d0b" } });
         fixture.Operation("recall2", "recall", "agent", "2026-09-04T03:01:00Z", "complete",
-            new { candidate_ids = new[] { "d0a" }, returned_ids = new[] { "d0a" } });
+            new { tool = "think", query = "accumulated design principles", context = (string?)null, candidate_ids = new[] { "d0a" }, returned_ids = new[] { "d0a" } });
         fixture.Execute("INSERT INTO runs VALUES(1,'dream','2026-09-01T00:00:00Z','2026-09-02T00:00:00Z','2026-09-04T04:00:00Z','complete')");
         fixture.Operation("assim", "assimilation", "dream", "2026-09-04T04:00:00Z", "complete",
             new { seed_id = "d0b", candidate_ids = new[] { "d0a" }, model_invoked = true, proposal_reused = false, relations = new[] { new { memory_id = "d0a", related_memory_id = "d0b", kind = "positive" } } }, run: 1, work: "assimilate:d0b");
@@ -66,16 +66,25 @@ public sealed class DailyReportTests
         Assert.Equal(Encoding.UTF8.GetByteCount(raw) * 2, summary["remember"]!["submitted_raw_bytes"]!.GetValue<int>());
         Assert.Equal(Encoding.UTF8.GetByteCount(raw), summary["remember"]!["new_stored_raw_bytes_known"]!.GetValue<int>());
         Assert.Equal(2, summary["remember"]!["created_d0"]!.GetValue<int>());
+        Assert.Equal(2, summary["recall"]!["calls"]!.GetValue<int>());
         Assert.Equal(3, summary["recall"]!["returned_d0_total"]!.GetValue<int>());
         Assert.Equal(2, summary["recall"]!["returned_d0_distinct"]!.GetValue<int>());
         Assert.Equal(1, summary["assimilation"]!["appended_categories"]!["same_source_d0"]!.GetValue<int>());
         var recalled = json["operations"]!.AsArray().Single(row => row!["id"]!.GetValue<string>() == "recall1")!;
         Assert.Equal("d0b", recalled["details"]!["candidate_ids"]![0]!.GetValue<string>());
         Assert.Equal("| <query>\n", recalled["details"]!["query"]!.GetValue<string>());
+        Assert.Equal("recall", recalled["details"]!["tool"]!.GetValue<string>());
+        var thought = json["operations"]!.AsArray().Single(row => row!["id"]!.GetValue<string>() == "recall2")!;
+        Assert.Equal("recall", thought["kind"]!.GetValue<string>());
+        Assert.Equal("think", thought["details"]!["tool"]!.GetValue<string>());
+        Assert.Equal("accumulated design principles", thought["details"]!["query"]!.GetValue<string>());
+        Assert.Null(thought["details"]!["context"]);
+        Assert.Equal("d0a", thought["details"]!["returned_ids"]![0]!.GetValue<string>());
         Assert.Equal(content, json["memories"]!.AsArray().Single(row => row!["id"]!.GetValue<string>() == "d0a")!["content"]!.GetValue<string>());
         Assert.Equal("high", json["api_calls"]![0]!["settings"]!["reasoning_effort"]!.GetValue<string>());
         Assert.DoesNotContain("last_recalled_at", File.ReadAllText(export.JsonPath));
         Assert.Contains(export.SnapshotId, File.ReadAllText(export.MarkdownPath));
+        Assert.Contains("| Recall / Think calls | 2 |", File.ReadAllText(export.MarkdownPath));
         Assert.DoesNotContain("<script>", File.ReadAllText(export.MarkdownPath));
     }
 

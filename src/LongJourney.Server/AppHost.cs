@@ -72,11 +72,13 @@ public static class AppHost
             Version = assemblyName.Version?.ToString() ?? "1.0.0"
         };
         options.ServerInfo.Description = """
-            Shared long-term memory across agents and sessions. Find prior preferences, constraints, decisions, and outcomes when they can help the current task.
+            Shared long-term memory across agents and sessions. Use recall to find concrete experiences, preferences, constraints, decisions, and outcomes; use think to find accumulated philosophy, principles, patterns, and perspectives relevant to a broader topic.
             Save meaningful new preferences, constraints, decisions, outcomes, and corrections for future use. Trace memories to their original evidence when context or provenance matters.
             """;
         options.ServerInstructions = """
-            Use recall when prior preferences, constraints, decisions, or outcomes could help the current task, especially when continuing earlier work.
+            Use recall to find specific experiences, preferences, constraints, decisions, or outcomes, especially when continuing earlier work; write a concrete query about the situation or memory needed.
+            Use think to search accumulated philosophy, principles, patterns, or perspectives before choosing a direction or comparing approaches; write topic around the broader idea or tension.
+            Recall and think share the same search and selection without depth filtering or preference. They return existing memories and record recall time; think does not generate new thinking or create memories.
             Use remember when a meaningful new experience is clear enough to preserve; do not record every message or tool result.
             Before a context reset or session end, check for useful experiences not yet saved.
             Use trace to inspect original evidence when a memory's context or provenance matters.

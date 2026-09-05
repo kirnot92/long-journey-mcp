@@ -108,16 +108,27 @@ public sealed class MemoryEngine(
         return failures;
     }
 
-    public async Task<RecallResult> RecallAsync(
+    public Task<RecallResult> RecallAsync(
         string query,
         string? context = null,
         CancellationToken cancellationToken = default)
     {
+        return RecallWithActivityAsync("recall", query, context, cancellationToken);
+    }
+
+    public Task<RecallResult> ThinkAsync(string topic, CancellationToken cancellationToken = default)
+    {
+        return RecallWithActivityAsync("think", topic, null, cancellationToken);
+    }
+
+    private async Task<RecallResult> RecallWithActivityAsync(
+        string tool, string query, string? context, CancellationToken cancellationToken)
+    {
         using var activity = ActivityScope.Begin(store, "recall", "agent", timeProvider.GetUtcNow(),
-            new { query, context, candidate_ids = Array.Empty<string>(), returned_ids = Array.Empty<string>(), settings = options });
+            new { tool, query, context, candidate_ids = Array.Empty<string>(), returned_ids = Array.Empty<string>(), settings = options });
         try
         {
-            var result = await RecallCoreAsync(query, context, cancellationToken);
+            var result = await RecallCoreAsync(query, context, tool, cancellationToken);
             activity.Complete(timeProvider.GetUtcNow());
             return result;
         }
@@ -128,16 +139,19 @@ public sealed class MemoryEngine(
         }
     }
 
-    private async Task<RecallResult> RecallCoreAsync(string query, string? context, CancellationToken cancellationToken)
+    private async Task<RecallResult> RecallCoreAsync(
+        string query, string? context, string tool, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(query))
         {
-            throw new InputException("query must not be empty.");
+            throw new InputException(tool == "think" ? "topic must not be empty." : "query must not be empty.");
         }
 
         if (query.Length > options.MaxRawCharacters || context?.Length > options.MaxRawCharacters)
         {
-            throw new InputException("Recall query or context exceeds the configured input bound.");
+            throw new InputException(tool == "think"
+                ? "Think topic exceeds the configured input bound."
+                : "Recall query or context exceeds the configured input bound.");
         }
 
         var candidates = await search.SearchAsync(query, new CallContext(), cancellationToken);

@@ -25,12 +25,13 @@ Daily Dream과 Weekly Meditation은 기존 기억을 바탕으로 새로운 기�
 같은 Source에서 나온 관찰이 여러 개여도 근거는 하나로 셉니다.
 Depth는 기억의 생성 계층을 나타내며, 정확성이나 신뢰도를 보증하는 점수로 사용하지 않습니다.
 
-## 세 가지 도구
+## 네 가지 도구
 
 | 도구 | 역할 |
 | --- | --- |
 | `remember(raw)` | 기억할 경험의 원문을 보존하고 관찰을 추출합니다. |
-| `recall(query, context?)` | 질문과 선택적 맥락에 맞는 기억을 찾아 반환합니다. |
+| `recall(query, context?)` | 구체적인 사건·조건·결과와 일치하는 경험을 찾아 반환합니다. |
+| `think(topic)` | 주제에 관해 축적된 철학·관점·원칙·패턴을 찾아 반환합니다. |
 | `trace(memory_id)` | 기억의 부모 연결을 따라 원문 Source까지 추적합니다. |
 
 `remember`는 명시적인 선호·제약, 중요한 결정, 관찰된 결과 또는 정정·예외처럼
@@ -48,9 +49,14 @@ Depth는 기억의 생성 계층을 나타내며, 정확성이나 신뢰도를 �
 동일한 원문을 다시 보내면 새 Source를 만들지 않습니다. 완료된 입력은 API 호출 없이 기존 결과를 반환하고,
 실패한 입력은 보존된 Source로 다시 처리할 수 있습니다.
 
-`recall`은 단어 검색과 embedding 검색의 후보를 결합한 뒤 모델이 선택한 기억을 기본 최대 10개 반환합니다.
+`recall`과 `think`는 같은 단어·embedding 검색과 모델 선택을 사용하며, 기존 기억을 기본 최대 10개 반환합니다.
+호출 에이전트는 사례를 찾을 때 `recall`에 구체적인 상황을, 설계 방향이나 대안을 검토할 때 `think`에 관점·원칙을 찾는 주제를 작성합니다.
+예를 들어 `recall`에는 “자동화된 배포에서 실패 원인을 추적하기 어려웠던 사례”,
+`think`에는 “자동화의 편의성과 실패 시 제어권에 관해 쌓인 관점”을 전달합니다.
+두 도구 모두 모든 depth를 검색합니다. 깊이 필터나 가중치, 쿼리 재작성은 없으며 `think`가 높은 depth를 반환한다는 보장은 없습니다.
+`think`는 저장된 기억을 검색하며, 추가 추론으로 답변이나 새 기억을 만들지 않습니다.
 호출 에이전트는 반환된 기억을 현재 맥락과 함께 판단해 답변에 사용합니다.
-회수 시각은 다음 Dream의 입력으로 활용하지만, 반복해서 회수한 기억의 근거 수나 검색 순위를 높이지 않습니다.
+두 도구의 회수 시각은 다음 Dream의 입력으로 활용하지만, 반복해서 회수한 기억의 근거 수나 검색 순위를 높이지 않습니다.
 `trace`는 부모 provenance를 추적합니다. Positive/negative 관계는 저장된 소유자에서 대상 방향으로만 사용합니다.
 입력·관찰·반환 개수의 상한은 [설정](docs/05-operations.md)으로 변경할 수 있습니다.
 
@@ -89,7 +95,7 @@ API 키가 없어도 서버를 시작하고 저장된 데이터를 `trace`와 In
 화면별 사용법과 조회 범위는 [Inspection 안내](docs/09-inspection.md)에 정리되어 있습니다.
 
 실사용 호출과 기억 처리 결과는 [Daily Report](docs/14-daily-report.md)에 기록됩니다.
-Remember의 raw 크기·생성 D0, Recall 반환, Assimilation 제안과 실제 관계 추가, 단계별 비용을
+Remember의 raw 크기·생성 D0, Recall·Think의 검색어·반환 기억, Assimilation 제안과 실제 관계 추가, 단계별 비용을
 데이터 폴더의 `reports/daily/`에 Markdown·JSON으로 자동 저장합니다. 보고서 생성에는 API 비용이 들지 않습니다.
 `--no-scheduler`에서도 보고 작업은 동작하며, 자동 파일 생성은 `--Engine:DailyReportsEnabled=false`로 끌 수 있습니다.
 
@@ -114,7 +120,7 @@ Meditation은 더 넓은 기억과 원문을 검토하며, 처리 순서를 모�
 사용자가 정한 양수를 지정합니다. 예산을 나중에 설정하면 밀린 주간 구간마다 별도 예산으로 실행할 수 있습니다.
 예산이 부족해 남은 작업은 다음 주간 실행으로 이월합니다.
 
-Remember·Recall·Dream에도 API 비용이 발생합니다.
+Remember·Recall·Think·Dream에도 API 비용이 발생합니다.
 호출 전 최대 예상 비용을 예약하고 응답의 token 사용량으로 정산하며, 사용량이 불명확한 호출은 예약액을 유지합니다.
 표시 비용은 설정 단가에 기반한 로컬 장부입니다. 예산·재시도·백업의 상세 동작은 [운영 안내](docs/05-operations.md)를 참고합니다.
 
@@ -124,7 +130,7 @@ Remember·Recall·Dream에도 API 비용이 발생합니다.
 | 용도 | 기본 모델 | 추론 수준 또는 차원 |
 | --- | --- | --- |
 | Remember | `gpt-5.6-terra` | `low` |
-| Recall | `gpt-5.6-terra` | `medium` |
+| Recall / Think | `gpt-5.6-terra` | `medium` |
 | Dream | `gpt-5.6-terra` | `high` |
 | Meditation | `gpt-5.6-sol` | `high` |
 | Embedding | `text-embedding-3-large` | 3,072차원 |

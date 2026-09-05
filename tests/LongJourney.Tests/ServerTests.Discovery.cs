@@ -27,9 +27,15 @@ public sealed partial class ServerTests
         Assert.Contains("preferences, constraints, decisions, and outcomes", description);
         Assert.Contains("corrections", description);
         Assert.Contains("original evidence", description);
+        Assert.Contains("Use recall to find concrete experiences", description);
+        Assert.Contains("use think to find accumulated philosophy", description);
 
         var instructions = result.GetProperty("instructions").GetString();
         Assert.Contains("Use recall", instructions);
+        Assert.Contains("write a concrete query", instructions);
+        Assert.Contains("Use think", instructions);
+        Assert.Contains("write topic around the broader idea or tension", instructions);
+        Assert.Contains("without depth filtering or preference", instructions);
         Assert.Contains("Use remember", instructions);
         Assert.Contains("Use trace", instructions);
         Assert.Contains("Before a context reset or session end", instructions);

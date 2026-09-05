@@ -22,7 +22,7 @@ public sealed class MemoryTools(MemoryEngine engine, ILogger<MemoryTools> logger
     internal static IReadOnlyList<McpServerTool> CreateTools(EngineOptions options)
     {
         var tools = new List<McpServerTool>();
-        foreach (var methodName in new[] { nameof(RememberAsync), nameof(RecallAsync), nameof(TraceAsync) })
+        foreach (var methodName in new[] { nameof(RememberAsync), nameof(RecallAsync), nameof(ThinkAsync), nameof(TraceAsync) })
         {
             var description = methodName == nameof(RememberAsync)
                 ? $"{RememberDescription}\nCurrent raw limit: {options.MaxRawCharacters} UTF-16 code units. The server extracts 0 to {options.MaxObservations} observations per Source; this cap is not a target."
@@ -49,13 +49,22 @@ public sealed class MemoryTools(MemoryEngine engine, ILogger<MemoryTools> logger
     }
 
     [McpServerTool(Name = "recall", UseStructuredContent = true, Destructive = false, OpenWorld = true)]
-    [Description("Retrieve relevant memories from the shared corpus. Records recall time without reinforcing truth, confidence, or ranking. Relations are outgoing only.")]
+    [Description("Retrieve concrete experiences, facts, preferences, decisions, or outcomes from the shared corpus. Phrase query around the specific situation or memory you need. Use think to search for accumulated philosophy, principles, patterns, or perspectives. Both tools use the same search and selection without depth filtering or preference. Records recall time without reinforcing truth, confidence, or ranking. Relations are outgoing only.")]
     public Task<RecallResult> RecallAsync(
-        [Description("What to search for in memory.")] string query,
+        [Description("The concrete experience, fact, or situation to find in memory.")] string query,
         [Description("Optional context for selecting relevant memories.")] string? context = null,
         CancellationToken cancellationToken = default)
     {
         return InvokeToolAsync(() => engine.RecallAsync(query, context, cancellationToken));
+    }
+
+    [McpServerTool(Name = "think", UseStructuredContent = true, Destructive = false, OpenWorld = true)]
+    [Description("Retrieve accumulated philosophy, principles, patterns, or perspectives relevant to a topic, for example before choosing a design direction or comparing approaches. Phrase topic as the broader idea or tension you want to consider; use recall for specific experiences or facts. Searches existing memories using the same search and selection as recall, without depth filtering or preference; results may include any depth. Does not generate new thinking or create memories. Records recall time without reinforcing truth, confidence, or ranking. Relations are outgoing only.")]
+    public Task<RecallResult> ThinkAsync(
+        [Description("The broader idea, principle, pattern, or tension to search for among accumulated perspectives.")] string topic,
+        CancellationToken cancellationToken = default)
+    {
+        return InvokeToolAsync(() => engine.ThinkAsync(topic, cancellationToken));
     }
 
     [McpServerTool(Name = "trace", UseStructuredContent = true, ReadOnly = true, OpenWorld = false)]

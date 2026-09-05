@@ -95,6 +95,9 @@ public sealed class ActivityRecordingTests
         await fixture.Engine.RecallAsync("no selection");
         var calls = fixture.Read("recall");
         Assert.Equal(4, calls.Count);
+        Assert.All(calls, call => Assert.Equal("recall", call.Details.GetProperty("tool").GetString()));
+        Assert.Equal("query", calls[1].Details.GetProperty("query").GetString());
+        Assert.Equal("context", calls[1].Details.GetProperty("context").GetString());
         Assert.Empty(calls[0].Details.GetProperty("candidate_ids").EnumerateArray());
         var candidates = calls[1].Details.GetProperty("candidate_ids").EnumerateArray().Select(value => value.GetString()).ToArray();
         var returned = calls[1].Details.GetProperty("returned_ids").EnumerateArray().Select(value => value.GetString()).ToArray();
@@ -104,6 +107,123 @@ public sealed class ActivityRecordingTests
         Assert.Equal(2, calls[3].Details.GetProperty("candidate_ids").GetArrayLength());
         Assert.Empty(calls[3].Details.GetProperty("returned_ids").EnumerateArray());
         Assert.Equal(4L, fixture.Scalar("SELECT COUNT(*) FROM recall_events"));
+    }
+
+    [Fact]
+    public async Task ThinkAndRecallReturnTheSameOrderedMixedDepthMemoriesAndOnlyRecordRecalls()
+    {
+        using var fixture = new Fixture();
+        var parents = new List<MemoryRecord>();
+        foreach (var raw in new[] { "first automation experience", "second automation experience", "third automation experience" })
+        {
+            parents.AddRange((await fixture.Engine.RememberAsync(raw)).Memories);
+        }
+        var parentIds = MemoryTestData.Ids(parents);
+        var run = fixture.Store.GetOrCreateRun(RunKind.Dream, Day.Date, Day.Date.AddDays(1), Day.AddDays(1), null);
+        var abstraction = fixture.Store.AddAbstraction(new AbstractionProposal("automation and user control", parentIds),
+            "fake", run, "pattern", 0, parentIds, ConsolidationFixture.Vector, Day.AddDays(1));
+        fixture.Store.AddRelation(new RelationProposal(parents[0].Id, parents[1].Id, RelationKind.Negative), run, Day.AddDays(1));
+        fixture.Store.FinishRun(run.Id, "complete", Day.AddDays(1));
+        var before = fixture.Store.ReadSnapshot();
+        const string topic = "automation and user control";
+
+        fixture.Clock.Now = Day.AddDays(2);
+        var recalled = await fixture.Engine.RecallAsync(topic);
+        Assert.All(recalled.Memories, memory => Assert.Equal(fixture.Clock.Now, memory.LastRecalledAt));
+        fixture.Clock.Now = Day.AddDays(3);
+        var thought = await fixture.Engine.ThinkAsync(topic);
+
+        Assert.Equal(4, thought.Memories.Count);
+        Assert.Equal(MemoryTestData.Ids(recalled.Memories), MemoryTestData.Ids(thought.Memories));
+        Assert.Contains(thought.Memories, memory => memory.Depth == 0);
+        Assert.Contains(thought.Memories, memory => memory.Id == abstraction.Id && memory.Depth == 1);
+        Assert.All(thought.Memories, memory => Assert.Equal(fixture.Clock.Now, memory.LastRecalledAt));
+        Assert.Equal(new[] { (topic, (string?)null), (topic, (string?)null) }, fixture.Cognition.Selections);
+        var after = fixture.Store.ReadSnapshot();
+        Assert.Equal(MemoryTestData.Ids(before.Memories), MemoryTestData.Ids(after.Memories));
+        Assert.Equal(8, after.RecallEvents.Count);
+        foreach (var memory in after.Memories)
+        {
+            var original = before.ById[memory.Id];
+            Assert.Equal(original.Content, memory.Content);
+            Assert.Equal(original.DerivedFrom, memory.DerivedFrom);
+            Assert.Equal(original.Relations, memory.Relations);
+            Assert.Equal(original.UniqueSourceRootCount, memory.UniqueSourceRootCount);
+            Assert.Equal(fixture.Clock.Now, memory.LastRecalledAt);
+        }
+
+        var calls = fixture.Read("recall");
+        Assert.Equal(2, calls.Count);
+        Assert.Equal("recall", calls[0].Details.GetProperty("tool").GetString());
+        Assert.Equal("think", calls[1].Details.GetProperty("tool").GetString());
+        Assert.All(calls, call =>
+        {
+            Assert.Null(call.ParentId);
+            Assert.Equal("agent", call.Origin);
+            Assert.Equal("complete", call.Status);
+            Assert.Equal(topic, call.Details.GetProperty("query").GetString());
+            Assert.Equal(JsonValueKind.Null, call.Details.GetProperty("context").ValueKind);
+        });
+        Assert.Equal(calls[0].Details.GetProperty("candidate_ids").GetRawText(), calls[1].Details.GetProperty("candidate_ids").GetRawText());
+        Assert.Equal(calls[0].Details.GetProperty("returned_ids").GetRawText(), calls[1].Details.GetProperty("returned_ids").GetRawText());
+        Assert.Null(ActivityScope.CurrentId);
+    }
+
+    [Fact]
+    public async Task ThinkRejectsBlankAndOversizedTopicsBeforeCognitionAndRecordsEachFailureOnce()
+    {
+        using var fixture = new Fixture();
+        await fixture.Engine.RememberAsync("existing experience");
+        var callsBefore = fixture.Cognition.Calls;
+        foreach (var topic in new[] { null, "", " \t" })
+        {
+            var error = await Assert.ThrowsAsync<InputException>(() => fixture.Engine.ThinkAsync(topic!));
+            Assert.Equal("topic must not be empty.", error.Message);
+            Assert.Null(ActivityScope.CurrentId);
+        }
+        var oversized = await Assert.ThrowsAsync<InputException>(
+            () => fixture.Engine.ThinkAsync(new string('x', fixture.Options.MaxRawCharacters + 1)));
+        Assert.Equal("Think topic exceeds the configured input bound.", oversized.Message);
+        Assert.Equal(callsBefore, fixture.Cognition.Calls);
+        Assert.Empty(fixture.Store.ReadSnapshot().RecallEvents);
+        var calls = fixture.Read("recall");
+        Assert.Equal(4, calls.Count);
+        Assert.All(calls, call =>
+        {
+            Assert.Null(call.ParentId);
+            Assert.Equal("think", call.Details.GetProperty("tool").GetString());
+            Assert.Equal("failed", call.Status);
+            Assert.Equal(nameof(InputException), call.ErrorType);
+            Assert.Empty(call.Details.GetProperty("candidate_ids").EnumerateArray());
+        });
+        Assert.Null(ActivityScope.CurrentId);
+    }
+
+    [Fact]
+    public async Task ThinkFailureAndCancellationDisposeTheirSingleActivityBeforeTheNextInvocation()
+    {
+        using var fixture = new Fixture();
+        await fixture.Engine.RememberAsync("existing experience");
+        fixture.Cognition.SelectionFailure = new InvalidOperationException("injected selection failure");
+        await Assert.ThrowsAsync<InvalidOperationException>(() => fixture.Engine.ThinkAsync("principles"));
+        Assert.Null(ActivityScope.CurrentId);
+        fixture.Cognition.SelectionFailure = null;
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(
+            () => fixture.Engine.ThinkAsync("principles", new CancellationToken(canceled: true)));
+        Assert.Null(ActivityScope.CurrentId);
+        Assert.Empty(fixture.Store.ReadSnapshot().RecallEvents);
+        Assert.Single((await fixture.Engine.ThinkAsync("principles")).Memories);
+        var calls = fixture.Read("recall");
+        Assert.Equal(3, calls.Count);
+        Assert.Equal("failed", calls[0].Status);
+        Assert.Equal("cancelled", calls[1].Status);
+        Assert.Equal("complete", calls[2].Status);
+        Assert.All(calls, call =>
+        {
+            Assert.Null(call.ParentId);
+            Assert.Equal("think", call.Details.GetProperty("tool").GetString());
+        });
+        Assert.Null(ActivityScope.CurrentId);
     }
 
     [Fact]
@@ -233,12 +353,12 @@ public sealed class ActivityRecordingTests
         };
         public SqliteMemoryStore Store { get; }
         public ActivityCognition Cognition { get; } = new();
+        public ConsolidationClock Clock { get; } = new() { Now = Day };
         public MemoryEngine Engine { get; }
         public Fixture()
         {
             Store = new SqliteMemoryStore(Options);
-            Engine = new MemoryEngine(Store, Cognition, new MemorySearch(Store, Cognition, Options), Options,
-                new ConsolidationClock { Now = Day });
+            Engine = new MemoryEngine(Store, Cognition, new MemorySearch(Store, Cognition, Options), Options, Clock);
         }
 
         public List<ActivityRow> Read(string kind)
@@ -276,19 +396,34 @@ public sealed class ActivityRecordingTests
         public string EmbeddingSpace => "test:3";
         public Func<Task>? BeforeExtract { get; set; }
         public bool EmptySelection { get; set; }
+        public int Calls { get; private set; }
+        public Exception? SelectionFailure { get; set; }
+        public List<(string Query, string? Context)> Selections { get; } = [];
         public async Task<CognitiveResult<IReadOnlyList<ObservationProposal>>> ExtractAsync(string raw, CallContext context, CancellationToken cancellationToken)
         {
+            Calls++;
             if (BeforeExtract is not null)
             {
                 await BeforeExtract();
             }
             return new([new ObservationProposal(raw)], "fake");
         }
-        public Task<EmbeddingVector> EmbedAsync(string text, CallContext context, CancellationToken cancellationToken) =>
-            Task.FromResult(ConsolidationFixture.Vector);
+        public Task<EmbeddingVector> EmbedAsync(string text, CallContext context, CancellationToken cancellationToken)
+        {
+            Calls++;
+            return Task.FromResult(ConsolidationFixture.Vector);
+        }
         public Task<CognitiveResult<IReadOnlyList<string>>> SelectAsync(string query, string? context,
-            IReadOnlyList<MemoryRecord> candidates, CallContext call, CancellationToken cancellationToken) =>
-            Task.FromResult(new CognitiveResult<IReadOnlyList<string>>(EmptySelection ? [] : candidates.Reverse().Select(memory => memory.Id).ToArray(), "fake"));
+            IReadOnlyList<MemoryRecord> candidates, CallContext call, CancellationToken cancellationToken)
+        {
+            Calls++;
+            Selections.Add((query, context));
+            if (SelectionFailure is not null)
+            {
+                throw SelectionFailure;
+            }
+            return Task.FromResult(new CognitiveResult<IReadOnlyList<string>>(EmptySelection ? [] : candidates.Reverse().Select(memory => memory.Id).ToArray(), "fake"));
+        }
         public Task<CognitiveResult<IReadOnlyList<RelationProposal>>> AssimilateAsync(MemoryRecord observation,
             IReadOnlyList<MemoryRecord> candidates, CallContext context, CancellationToken cancellationToken) => throw new NotSupportedException();
         public Task<CognitiveResult<IReadOnlyList<AbstractionProposal>>> AbstractAsync(IReadOnlyList<MemoryRecord> neighborhood,

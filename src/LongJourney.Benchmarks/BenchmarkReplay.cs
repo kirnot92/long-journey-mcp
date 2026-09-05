@@ -97,7 +97,7 @@ public static class BenchmarkReplay
         return ordered;
     }
 
-    private static Dictionary<string, string> CreateSourceMap(IReadOnlyList<BenchmarkSession> sessions)
+    internal static Dictionary<string, string> CreateSourceMap(IReadOnlyList<BenchmarkSession> sessions)
     {
         var map = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (var session in sessions)
@@ -199,7 +199,7 @@ public static class BenchmarkReplay
         full.SetState(CheckpointKey, JsonSerializer.Serialize(checkpoint, JsonDefaults.Options));
     }
 
-    private static void ImportSharedSession(
+    internal static void ImportSharedSession(
         BenchmarkSession session, RememberResult remembered,
         SqliteMemoryStore baseline, SqliteMemoryStore full, string embeddingSpace)
     {
@@ -248,7 +248,7 @@ public static class BenchmarkReplay
         }
     }
 
-    private static void VerifySharedObservations(
+    internal static void VerifySharedObservations(
         SqliteMemoryStore baseline, SqliteMemoryStore full,
         IReadOnlyDictionary<string, string> sourceToSession, string embeddingSpace)
     {

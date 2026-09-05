@@ -2,9 +2,37 @@ using LongJourney.Benchmarks;
 using LongJourney.OpenAI;
 
 var command = args.Length == 0 ? "run" : args[0];
-var configPath = args.Length > 1 ? args[1] : "benchmarks/longmemeval-s.json";
+var configPath = args.Length > 1 ? args[1] : command.StartsWith("micro-", StringComparison.Ordinal)
+    ? "benchmarks/dream-micro.json" : "benchmarks/longmemeval-s.json";
 try
 {
+    if (command is "micro-run" or "micro-validate")
+    {
+        var microOptions = DreamMicroOptions.Load(configPath);
+        if (command == "micro-validate")
+        {
+            var selected = microOptions.ValidateAndSelect();
+            foreach (var question in selected)
+            {
+                Console.WriteLine($"{question.QuestionId} {question.QuestionType}: {question.Sessions.Count} sessions, {question.AnswerSessionIds.Count} gold");
+            }
+            Console.WriteLine($"Validated micro experiment: 8 questions; total cap ${microOptions.TotalBudgetUsd}; no Meditation.");
+            return 0;
+        }
+        using var microCancellation = new CancellationTokenSource();
+        Console.CancelKeyPress += (_, eventArgs) =>
+        {
+            eventArgs.Cancel = true;
+            microCancellation.Cancel();
+        };
+        var microKey = new OpenAiApiKeySource(Directory.GetCurrentDirectory());
+        if (string.IsNullOrWhiteSpace(microKey.Read()))
+        {
+            throw new LongJourney.Core.InputException("Set OPENAI_API_KEY or place one API key in key.txt.");
+        }
+        using var microHttp = new HttpClient { Timeout = Timeout.InfiniteTimeSpan };
+        return await new DreamMicroRunner(microOptions, microHttp, microKey.Read).RunAsync(microCancellation.Token) ? 0 : 2;
+    }
     var options = BenchmarkOptions.Load(configPath);
     if (command == "validate")
     {
@@ -25,7 +53,7 @@ try
     }
     if (command != "run")
     {
-        throw new ArgumentException("Usage: LongJourney.Benchmarks [run|validate|report] [configuration.json]");
+        throw new ArgumentException("Usage: LongJourney.Benchmarks [run|validate|report|micro-run|micro-validate] [configuration.json]");
     }
     using var cancellation = new CancellationTokenSource();
     Console.CancelKeyPress += (_, eventArgs) =>

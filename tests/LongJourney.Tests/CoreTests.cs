@@ -143,13 +143,25 @@ public sealed class CoreTests
         Assert.Empty(fixture.Store.GetIncompleteSources());
     }
 
-    [Fact]
-    public async Task TooLargeInputIsRejectedBeforeArchiveOrLlm()
+    [Theory]
+    [InlineData("한글원문")]
+    [InlineData("한😀글")]
+    public async Task RawLimitCountsUtf16AndRejectsBeforeArchiveOrLlm(string atLimit)
     {
         using var fixture = new Fixture();
-        await Assert.ThrowsAsync<InputException>(() => fixture.Engine.RememberAsync(new string('x', fixture.Options.MaxRawCharacters + 1)));
+        fixture.Options.MaxRawCharacters = 4;
+        var error = await Assert.ThrowsAsync<InputException>(() => fixture.Engine.RememberAsync(atLimit + "x"));
+        Assert.Contains("raw has 5 UTF-16 characters", error.Message);
+        Assert.Contains("MaxRawCharacters=4", error.Message);
+        Assert.Contains("preserving its necessary context", error.Message);
+        var storeError = Assert.Throws<InputException>(() => fixture.Store.SaveSource(atLimit + "x", Day));
+        Assert.Equal(error.Message, storeError.Message);
         Assert.Equal(0, fixture.Cognition.ExtractCalls);
         Assert.Empty(Directory.GetFiles(Path.Combine(fixture.Directory, "sources"), "*.md", SearchOption.AllDirectories));
+
+        var accepted = await fixture.Engine.RememberAsync(atLimit);
+        Assert.Equal(atLimit, fixture.Store.ReadSource(accepted.SourceId).Raw);
+        Assert.Equal(1, fixture.Cognition.ExtractCalls);
     }
 
     [Fact]

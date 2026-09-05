@@ -51,7 +51,7 @@ public sealed partial class OpenAiCognitionTests
     [InlineData("completed", "refused", true)]
     [InlineData("completed", "not JSON", false)]
     [InlineData("completed", "{\"observations\":[],\"surprise\":true}", false)]
-    [InlineData("completed", "{\"observations\":[{\"content\":\"a\"},{\"content\":\"b\"}]}", false)]
+    [InlineData("completed", "{\"observations\":[{\"content\":\"a\"},{\"content\":\"b\"},{\"content\":\"c\"},{\"content\":\"d\"}]}", false)]
     public async Task InvalidOrRefusedResultsRemainBilled(string status, string content, bool refusal)
     {
         var ledger = new Ledger();

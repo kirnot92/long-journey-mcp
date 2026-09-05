@@ -5,7 +5,7 @@ public sealed class EngineOptions
     public string DataDirectory { get; set; } = "data";
     public int RootBase { get; set; } = 3;
     public int MaxRawCharacters { get; set; } = 4000;
-    public int MaxObservations { get; set; } = 1;
+    public int MaxObservations { get; set; } = 3;
     public int MaxMemoryCharacters { get; set; } = 4000;
     public int SearchCandidates { get; set; } = 30;
     public int RecallLimit { get; set; } = 10;

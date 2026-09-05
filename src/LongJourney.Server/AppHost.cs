@@ -46,7 +46,7 @@ public static class AppHost
 
         builder.Services.AddMcpServer()
             .WithHttpTransport(options => options.SessionMode = HttpServerSessionMode.Stateless)
-            .WithTools<MemoryTools>(JsonDefaults.Options);
+            .WithTools(MemoryTools.CreateTools(engineOptions));
 
         var app = builder.Build();
         try

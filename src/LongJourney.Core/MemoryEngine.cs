@@ -14,7 +14,8 @@ public sealed class MemoryEngine(
         {
             throw new InputException(
                 $"raw has {raw.Length} UTF-16 characters, exceeding MaxRawCharacters={options.MaxRawCharacters}. " +
-                "Increase MaxRawCharacters to preserve the complete input.");
+                "Select one coherent experience and remove unrelated material while preserving its necessary context. " +
+                "Do not mechanically split the same experience to fit the limit.");
         }
 
         var artifact = store.SaveSource(raw, timeProvider.GetUtcNow());

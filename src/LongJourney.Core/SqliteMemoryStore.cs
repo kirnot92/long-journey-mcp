@@ -93,7 +93,8 @@ public sealed partial class SqliteMemoryStore : IMemoryStore
         {
             throw new InputException(
                 $"raw has {raw.Length} UTF-16 characters, exceeding MaxRawCharacters={_options.MaxRawCharacters}. " +
-                "Increase MaxRawCharacters to preserve the complete input.");
+                "Select one coherent experience and remove unrelated material while preserving its necessary context. " +
+                "Do not mechanically split the same experience to fit the limit.");
         }
 
         var contentHash = SourceArchive.ComputeContentHash(raw);

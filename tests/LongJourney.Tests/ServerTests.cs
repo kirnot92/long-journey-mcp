@@ -52,8 +52,12 @@ public sealed partial class ServerTests
         }
 
         Assert.Equal(new[] { "raw" }, rememberProperties);
+        Assert.False(rememberTool.GetProperty("annotations").GetProperty("destructiveHint").GetBoolean());
+        Assert.True(rememberTool.GetProperty("annotations").GetProperty("openWorldHint").GetBoolean());
         var traceTool = Assert.Single(tools, tool => tool.GetProperty("name").GetString() == "trace");
         Assert.True(traceTool.GetProperty("inputSchema").GetProperty("properties").TryGetProperty("memory_id", out _));
+        Assert.True(traceTool.GetProperty("annotations").GetProperty("readOnlyHint").GetBoolean());
+        Assert.False(traceTool.GetProperty("annotations").GetProperty("openWorldHint").GetBoolean());
 
         const string raw = "오늘 C#으로 기억 서버를 작성했다.";
         var remembered = Structured(await host.RpcAsync("tools/call", new
@@ -239,11 +243,15 @@ public sealed partial class ServerTests
         }
         private int sequence;
 
-        public static async Task<RunningHost> StartAsync()
+        public static async Task<RunningHost> StartAsync(Action<WebApplicationBuilder>? configure = null)
         {
             var directory = Path.Combine(Path.GetTempPath(), "long-journey-http-" + Guid.NewGuid().ToString("N"));
             var cognition = new CannedCognition();
-            var app = AppHost.Build([], builder => Configure(builder, directory, cognition));
+            var app = AppHost.Build([], builder =>
+            {
+                Configure(builder, directory, cognition);
+                configure?.Invoke(builder);
+            });
             try
             {
                 await app.StartAsync();

@@ -41,9 +41,12 @@ public sealed class OpenAiCognition : ICognition
         var observationsSchema = StructuredOutputSchema.Array(observationSchema, _engine.MaxObservations);
         var schema = StructuredOutputSchema.Object(("observations", observationsSchema));
         var prompt = $"""
-            Extract direct observations from the Source that may be worth recalling in the future.
-            Normalize minimally and preserve uncertainty, conditions, negation, and the context needed to understand an observation.
-            Do not generalize or infer personality, preferences, or causal explanations.
+            Extract direct observations from the Source that are independently worth recalling in the future.
+            The observation count is a cap, not a target. Do not paraphrase each turn or repeat the same claim in multiple observations.
+            Keep inseparable context, conditions, attempts, outcomes, exceptions, and corrections together in one observation.
+            Do not force unrelated topics into one memory. Normalize minimally and write concisely while preserving important wording, uncertainty, and negation.
+            Distinguish proposals and plans from decisions and completed actions; preserve what a correction changes.
+            Preserve explicitly stated preferences and constraints, but do not infer unstated preferences, personality, or causal explanations, or generalize beyond the Source.
             Return zero to {_engine.MaxObservations} observations, each at most {_engine.MaxMemoryCharacters} characters.
             Return an empty list when the Source contains no information worth remembering.
             """;

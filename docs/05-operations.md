@@ -48,7 +48,7 @@ dotnet run --project src/LongJourney.Server -- --Server:Port=5088 --Engine:DataD
     "TimeZoneId": "Asia/Seoul",
     "RootBase": 3,
     "MaxRawCharacters": 4000,
-    "MaxObservations": 1,
+    "MaxObservations": 3,
     "MaxMemoryCharacters": 4000,
     "SearchCandidates": 30,
     "RecallLimit": 10,
@@ -64,7 +64,9 @@ dotnet run --project src/LongJourney.Server -- --Server:Port=5088 --Engine:DataD
 
 서버 시작 시 잘못된 설정은 해당 Engine 설정명을 포함한 오류로 거부한다. DataDirectory는 빈 문자열이나 공백일 수 없으며, SchedulerPollSeconds의 허용 범위는 1~4,294,967초다. 데이터 경로를 해석하거나 corpus 파일을 만들기 전에 검증한다.
 
-문자·개수 제한과 탐색 크기는 변경 가능한 구현 기본값이다. 상한을 초과한 raw를 임의로 자르지 않고 입력 오류를 반환한다. 1개를 기본으로 하는 observation 상한도 설정값이며, 고정된 Core invariant로 새로 도입한 것은 아니다. Source 하나는 observation 개수와 관계없이 root 하나로 센다.
+문자·개수 제한과 탐색 크기는 변경 가능한 구현 기본값이다. raw 상한은 .NET 문자열의 UTF-16 code unit 수로 검사한다. 일반적인 한글 음절은 1개, 보조 평면 emoji는 2개로 세며 token 수와는 다르다. 상한을 초과한 raw는 Source 저장이나 모델 호출 전에 입력 오류로 반환하며 임의로 자르지 않는다. 오류에는 실제 길이와 설정 상한, 필요한 맥락을 유지하면서 관련 없는 내용을 제외하라는 안내를 담는다.
+
+Source당 observation 기본 상한은 3개다. 이 값은 첫 실사용을 위한 잠정 운영값이며 고정된 Core invariant나 생성 목표가 아니다. 기본 설정에서는 Source에서 독립적으로 다시 찾을 가치가 있는 직접 관찰을 0~3개 선택하고, 조건·결과·예외처럼 함께 있어야 이해되는 내용은 한 관찰에 보존한다. 같은 주장을 반복하거나 발화마다 관찰을 만들지 않으며, 상한을 맞추려고 관련 없는 주제를 한 기억에 합치지 않는다. 본문은 간결하게 작성하되 중요한 세부사항과 정정 전후, 계획·결정·완료된 행동의 차이를 보존한다. 기존 `MaxMemoryCharacters=4000`은 유지한다. Source 하나는 observation 개수와 관계없이 root 하나로 센다.
 
 Core invariant는 모든 생성 경로에서 강제한다. 같은 바로 아래 depth의 부모가 최소 B개 있어야 하고, 서로 다른 Source root의 합집합이 `B^depth` 이상이어야 한다. `RootBase`는 신규 corpus에서 선택하며 기존 corpus의 값을 설정만 바꿔 변경할 수 없다. 원문·content·부모 provenance는 생성 뒤 수정하지 않는다.
 
@@ -78,7 +80,13 @@ Core invariant는 모든 생성 경로에서 강제한다. 같은 바로 아래 
 | `recall` | `query`, 선택적 `context` | `memories` |
 | `trace` | `memory_id` | `memory_id`, 부모를 포함한 `memories`, 원문이 포함된 `sources` |
 
-`remember`에는 호출 에이전트가 기억할 가치가 있다고 선택한 하나의 일관된 경험과 그 경험을 이해하는 데 필요한 맥락을 전달한다. Source 생성 시각은 내부에서 기록한다. 발언자·프로젝트·세션 필수 인자는 없다. 동일 raw는 문자열 완전 일치 기준이고 공백·대소문자 차이는 별개 입력이다. 중복 완료 입력은 기존 ID와 기억을 반환한다. 처리 중이면 기존 Source의 상태를 반환하며, 실패한 입력은 같은 Source로 다시 처리할 수 있다.
+`remember`에는 호출 에이전트가 기억할 가치가 있다고 선택한 하나의 일관된 경험과 그 경험을 이해하는 데 필요한 맥락을 전달한다. 명시적인 선호·제약, 중요한 결정, 관찰된 결과, 정정·예외가 기록할 만큼 갖춰졌을 때 호출한다. 매 발화나 도구 실행마다 기록할 필요는 없다. 세션 종료·맥락 압축 전에는 아직 기록하지 않은 유용한 경험을 점검하되, 이미 갖춰진 중요한 경험의 기록을 그때까지 미루지는 않는다.
+
+raw는 관련 원문과 필요한 사실적 맥락을 포함한다. 중요한 표현·수치·조건·불확실성·결과를 보존하고, 인용과 호출 에이전트가 덧붙인 설명을 구분한다. 원문 대신 추론한 성향이나 일반화만 전달하지 않는다. 입력은 보통 몇 문장~짧은 문단으로 작성하며, 약 500~1,500자는 참고 범위일 뿐 최소량이나 목표가 아니다. 짧아도 충분하면 그대로 보내고, 필요한 맥락이 있으면 설정 상한까지 사용할 수 있다. MCP 도구 설명은 실제 설정된 입력 상한과 observation 상한을 안내한다.
+
+길이 제한을 피하려고 같은 경험을 발화별·고정 길이별로 기계적으로 나누지 않는다. 하나의 문제 발생·시도·결과 확인은 함께 보존할 수 있다. 별개의 경험은 별도로 기록하고, 이미 기록한 뒤 새로운 결과나 정정이 생겼다면 새 증거와 필요한 맥락을 후속 경험으로 기록한다. Source ID가 다르다고 실제로 독립적인 경험인지까지 서버가 판정하지는 않는다.
+
+Source 생성 시각은 내부에서 기록하며 원문에 등장하는 사건의 발생 시각과 같다는 뜻은 아니다. 발언자·프로젝트·세션 필수 인자는 없다. 새로운 증거 없이 이미 기록한 내용을 바꾸어 다시 보내지 않는다. 동일 raw는 문자열 완전 일치 기준이고 공백·대소문자 차이나 재서술은 별개 입력이다. 중복 완료 입력은 기존 ID와 기억을 반환한다. 처리 중이면 기존 Source의 상태를 반환하며, 실패한 입력은 같은 Source로 다시 처리할 수 있다.
 
 각 기억의 `relations`에는 `related_memory_id`, `kind`, `related_at`, `sequence`가 있다. `positive_related`/`negative_related`는 outgoing ID 목록이다. A→B 관계를 추가해도 B→A를 만들거나 조회하지 않는다. 동일 방향에서 positive와 negative는 별도로 존재할 수 있다. 재발견은 기존 `related_at`을 갱신하지 않는다. `trace`는 immutable `derived_from`으로 부모와 원문만 추적한다.
 

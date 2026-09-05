@@ -8,10 +8,41 @@ namespace LongJourney.Server;
 [McpServerToolType]
 public sealed class MemoryTools(MemoryEngine engine, ILogger<MemoryTools> logger)
 {
+    private const string RememberDescription = """
+        Remember one coherent experience that may be useful in future sessions.
+        Call when an explicit preference or constraint, consequential decision, observed outcome, or correction is clear enough to preserve.
+        Record meaningful developments rather than every message or tool result. Before a context reset or session end, check for useful experiences not yet saved.
+        Keep raw focused, usually a few sentences or short paragraphs. Include selected source material and enough factual context to understand what happened.
+        Preserve important wording, conditions, uncertainty, and outcomes; distinguish plans, decisions, and completed actions. Separate quoted material from added factual context.
+        Record separate experiences separately, but do not mechanically split one experience to fit the limit.
+        Avoid resubmitting recorded material without new evidence. Exact duplicate raw is deduplicated; reworded duplicates are not.
+        Source created time is assigned internally when recorded and does not establish when the event happened; include event timing in raw when relevant. No speaker or project metadata is required.
+        """;
+
+    internal static IReadOnlyList<McpServerTool> CreateTools(EngineOptions options)
+    {
+        var tools = new List<McpServerTool>();
+        foreach (var methodName in new[] { nameof(RememberAsync), nameof(RecallAsync), nameof(TraceAsync) })
+        {
+            var description = methodName == nameof(RememberAsync)
+                ? $"{RememberDescription}\nCurrent raw limit: {options.MaxRawCharacters} UTF-16 code units. The server extracts 0 to {options.MaxObservations} observations per Source; this cap is not a target."
+                : null;
+            // Create the target at invocation time so metadata registration does not open the corpus.
+            tools.Add(McpServerTool.Create(typeof(MemoryTools).GetMethod(methodName)!,
+                request => ActivatorUtilities.CreateInstance<MemoryTools>(request.Services!),
+                new McpServerToolCreateOptions
+                {
+                    Description = description,
+                    SerializerOptions = JsonDefaults.Options
+                }));
+        }
+        return tools;
+    }
+
     [McpServerTool(Name = "remember", UseStructuredContent = true, Destructive = false, OpenWorld = true)]
-    [Description("Remember one coherent experience the caller agent considers worth remembering, including the context needed to understand it. Exact duplicate raw input is not stored again. Created time is assigned internally; no speaker or project metadata is required.")]
+    [Description(RememberDescription)]
     public Task<RememberResult> RememberAsync(
-        [Description("One coherent experience selected by the caller agent, with the context needed to understand it.")] string raw,
+        [Description("Selected source material for one coherent experience, with the factual context needed to understand it. Preserve relevant wording, conditions, uncertainty, and outcomes; distinguish plans from completed actions.")] string raw,
         CancellationToken cancellationToken)
     {
         return InvokeToolAsync(() => engine.RememberAsync(raw, cancellationToken));

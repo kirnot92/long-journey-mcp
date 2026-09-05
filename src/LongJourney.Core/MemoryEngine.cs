@@ -116,9 +116,12 @@ public sealed class MemoryEngine(
         return RecallWithActivityAsync("recall", query, context, cancellationToken);
     }
 
-    public Task<RecallResult> ThinkAsync(string topic, CancellationToken cancellationToken = default)
+    public Task<RecallResult> ThinkAsync(
+        string topic,
+        string? context = null,
+        CancellationToken cancellationToken = default)
     {
-        return RecallWithActivityAsync("think", topic, null, cancellationToken);
+        return RecallWithActivityAsync("think", topic, context, cancellationToken);
     }
 
     private async Task<RecallResult> RecallWithActivityAsync(
@@ -150,7 +153,7 @@ public sealed class MemoryEngine(
         if (query.Length > options.MaxRawCharacters || context?.Length > options.MaxRawCharacters)
         {
             throw new InputException(tool == "think"
-                ? "Think topic exceeds the configured input bound."
+                ? "Think topic or context exceeds the configured input bound."
                 : "Recall query or context exceeds the configured input bound.");
         }
 

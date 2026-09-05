@@ -42,7 +42,7 @@ dotnet run --project src/LongJourney.Server -- --daily-report 2026-09-01..2026-0
 
 query·context, 당시 후보와 최종 반환 기억의 ID·순서를 저장한다. 반환된 D0의 횟수와 고유 개수를 나눠 보여주고, 높은 depth의 반환도 보존한다. 후보가 없는 경우, 후보는 있지만 반환이 없는 경우, 오류를 구분할 수 있다.
 
-Recall과 Think는 같은 검색·선택 경로를 사용한다. 두 호출 모두 `kind=recall`로 기록하고 기존 `summary.recall`에 합산한다. Markdown의 `Recall / Think` 수치는 이 합계다. 상세 JSON의 `operations[].details.tool`은 `recall` 또는 `think`이며, Think의 `topic`은 `details.query`에, `context`는 null로 기록한다. 호출별 후보·반환 ID를 `memories`의 content·depth와 연결하면 두 도구의 실제 검색어와 반환 깊이를 비교할 수 있다. 이 필드가 없던 과거 기록은 도구 구분 미계측으로 다루며 쿼리 표현으로 추측하지 않는다.
+Recall과 Think는 같은 검색·선택 경로를 사용한다. 두 호출 모두 `kind=recall`로 기록하고 기존 `summary.recall`에 합산한다. Markdown의 `Recall / Think` 수치는 이 합계다. 상세 JSON의 `operations[].details.tool`은 `recall` 또는 `think`이며, Think의 `topic`은 `details.query`에 기록한다. 두 도구 모두 전달받은 `context`를 `details.context`에 그대로 기록하고, 생략하거나 null로 전달하면 null로 기록한다. 호출별 후보·반환 ID를 `memories`의 content·depth와 연결하면 두 도구의 실제 검색어와 반환 깊이를 비교할 수 있다. 이 필드가 없던 과거 기록은 도구 구분 미계측으로 다루며 쿼리 표현으로 추측하지 않는다.
 
 기억 내용·depth는 불변 ID로 연결하지만 현재 관계 목록을 과거 Recall 맥락으로 취급하지 않는다. 기록된 반환은 서버 측 결과이며 에이전트가 답변에 실제 사용했는지를 뜻하지 않는다.
 

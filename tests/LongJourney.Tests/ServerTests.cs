@@ -58,7 +58,9 @@ public sealed partial class ServerTests
         Assert.Contains("concrete experiences", recallTool.GetProperty("description").GetString(), StringComparison.OrdinalIgnoreCase);
         var thinkTool = Assert.Single(tools, tool => tool.GetProperty("name").GetString() == "think");
         var thinkSchema = thinkTool.GetProperty("inputSchema");
-        Assert.Equal("topic", Assert.Single(thinkSchema.GetProperty("properties").EnumerateObject()).Name);
+        Assert.Collection(thinkSchema.GetProperty("properties").EnumerateObject(),
+            property => Assert.Equal("topic", property.Name),
+            property => Assert.Equal("context", property.Name));
         Assert.Equal("string", thinkSchema.GetProperty("properties").GetProperty("topic").GetProperty("type").GetString());
         Assert.Equal("topic", Assert.Single(thinkSchema.GetProperty("required").EnumerateArray()).GetString());
         Assert.Contains("accumulated philosophy", thinkTool.GetProperty("description").GetString());
@@ -129,6 +131,20 @@ public sealed partial class ServerTests
         Assert.Equal(memoryId, thoughtMemory.GetProperty("id").GetString());
         Assert.Equal(0, thoughtMemory.GetProperty("depth").GetInt32());
         Assert.NotEqual(JsonValueKind.Null, thoughtMemory.GetProperty("last_recalled_at").ValueKind);
+        Assert.Equal(("기억 서버의 설계 원칙", (string?)null), host.Cognition.Selections[^1]);
+
+        const string thinkContext = "  새 도구의 설계 방향을 비교 중\n";
+        var contextualThought = Structured(await host.RpcAsync("tools/call", new
+        {
+            name = "think",
+            arguments = new
+            {
+                topic = "기억 서버의 설계 원칙",
+                context = thinkContext
+            }
+        }));
+        Assert.Equal(memoryId, Assert.Single(contextualThought.GetProperty("memories").EnumerateArray()).GetProperty("id").GetString());
+        Assert.Equal(("기억 서버의 설계 원칙", thinkContext), host.Cognition.Selections[^1]);
 
         var traced = Structured(await host.RpcAsync("tools/call", new
         {
@@ -375,6 +391,7 @@ public sealed partial class ServerTests
             get; private set;
         }
         public int Calls { get; private set; }
+        public List<(string Query, string? Context)> Selections { get; } = [];
         public string EmbeddingSpace => "test-http:3";
         public Task<CognitiveResult<IReadOnlyList<ObservationProposal>>> ExtractAsync(
             string raw, CallContext context, CancellationToken cancellationToken)
@@ -394,6 +411,7 @@ public sealed partial class ServerTests
             CallContext call, CancellationToken cancellationToken)
         {
             Calls++;
+            Selections.Add((query, context));
             var memoryIds = MemoryTestData.Ids(candidates);
             var result = new CognitiveResult<IReadOnlyList<string>>(memoryIds, "test-http");
             return Task.FromResult(result);

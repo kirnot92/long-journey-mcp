@@ -109,8 +109,12 @@ public sealed class ActivityRecordingTests
         Assert.Equal(4L, fixture.Scalar("SELECT COUNT(*) FROM recall_events"));
     }
 
-    [Fact]
-    public async Task ThinkAndRecallReturnTheSameOrderedMixedDepthMemoriesAndOnlyRecordRecalls()
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData(" \t")]
+    [InlineData("  comparing maintenance approaches\n")]
+    public async Task ThinkAndRecallReturnTheSameOrderedMixedDepthMemoriesAndOnlyRecordRecalls(string? context)
     {
         using var fixture = new Fixture();
         var parents = new List<MemoryRecord>();
@@ -125,20 +129,22 @@ public sealed class ActivityRecordingTests
         fixture.Store.AddRelation(new RelationProposal(parents[0].Id, parents[1].Id, RelationKind.Negative), run, Day.AddDays(1));
         fixture.Store.FinishRun(run.Id, "complete", Day.AddDays(1));
         var before = fixture.Store.ReadSnapshot();
+        fixture.Cognition.EmbeddedTexts.Clear();
         const string topic = "automation and user control";
 
         fixture.Clock.Now = Day.AddDays(2);
-        var recalled = await fixture.Engine.RecallAsync(topic);
+        var recalled = await fixture.Engine.RecallAsync(topic, context);
         Assert.All(recalled.Memories, memory => Assert.Equal(fixture.Clock.Now, memory.LastRecalledAt));
         fixture.Clock.Now = Day.AddDays(3);
-        var thought = await fixture.Engine.ThinkAsync(topic);
+        var thought = await fixture.Engine.ThinkAsync(topic, context);
 
         Assert.Equal(4, thought.Memories.Count);
         Assert.Equal(MemoryTestData.Ids(recalled.Memories), MemoryTestData.Ids(thought.Memories));
         Assert.Contains(thought.Memories, memory => memory.Depth == 0);
         Assert.Contains(thought.Memories, memory => memory.Id == abstraction.Id && memory.Depth == 1);
         Assert.All(thought.Memories, memory => Assert.Equal(fixture.Clock.Now, memory.LastRecalledAt));
-        Assert.Equal(new[] { (topic, (string?)null), (topic, (string?)null) }, fixture.Cognition.Selections);
+        Assert.Equal(new[] { (topic, context), (topic, context) }, fixture.Cognition.Selections);
+        Assert.Equal(new[] { topic, topic }, fixture.Cognition.EmbeddedTexts);
         var after = fixture.Store.ReadSnapshot();
         Assert.Equal(MemoryTestData.Ids(before.Memories), MemoryTestData.Ids(after.Memories));
         Assert.Equal(8, after.RecallEvents.Count);
@@ -162,7 +168,7 @@ public sealed class ActivityRecordingTests
             Assert.Equal("agent", call.Origin);
             Assert.Equal("complete", call.Status);
             Assert.Equal(topic, call.Details.GetProperty("query").GetString());
-            Assert.Equal(JsonValueKind.Null, call.Details.GetProperty("context").ValueKind);
+            Assert.Equal(context, call.Details.GetProperty("context").GetString());
         });
         Assert.Equal(calls[0].Details.GetProperty("candidate_ids").GetRawText(), calls[1].Details.GetProperty("candidate_ids").GetRawText());
         Assert.Equal(calls[0].Details.GetProperty("returned_ids").GetRawText(), calls[1].Details.GetProperty("returned_ids").GetRawText());
@@ -170,7 +176,7 @@ public sealed class ActivityRecordingTests
     }
 
     [Fact]
-    public async Task ThinkRejectsBlankAndOversizedTopicsBeforeCognitionAndRecordsEachFailureOnce()
+    public async Task ThinkValidatesTopicAndContextBoundsBeforeCognitionAndRecordsEachFailureOnce()
     {
         using var fixture = new Fixture();
         await fixture.Engine.RememberAsync("existing experience");
@@ -183,11 +189,14 @@ public sealed class ActivityRecordingTests
         }
         var oversized = await Assert.ThrowsAsync<InputException>(
             () => fixture.Engine.ThinkAsync(new string('x', fixture.Options.MaxRawCharacters + 1)));
-        Assert.Equal("Think topic exceeds the configured input bound.", oversized.Message);
+        Assert.Equal("Think topic or context exceeds the configured input bound.", oversized.Message);
+        var oversizedContext = await Assert.ThrowsAsync<InputException>(
+            () => fixture.Engine.ThinkAsync("principles", new string('x', fixture.Options.MaxRawCharacters + 1)));
+        Assert.Equal(oversized.Message, oversizedContext.Message);
         Assert.Equal(callsBefore, fixture.Cognition.Calls);
         Assert.Empty(fixture.Store.ReadSnapshot().RecallEvents);
         var calls = fixture.Read("recall");
-        Assert.Equal(4, calls.Count);
+        Assert.Equal(5, calls.Count);
         Assert.All(calls, call =>
         {
             Assert.Null(call.ParentId);
@@ -197,6 +206,10 @@ public sealed class ActivityRecordingTests
             Assert.Empty(call.Details.GetProperty("candidate_ids").EnumerateArray());
         });
         Assert.Null(ActivityScope.CurrentId);
+
+        var atLimit = new string('x', fixture.Options.MaxRawCharacters);
+        Assert.Single((await fixture.Engine.ThinkAsync(atLimit, atLimit)).Memories);
+        Assert.Equal((atLimit, atLimit), Assert.Single(fixture.Cognition.Selections));
     }
 
     [Fact]
@@ -209,7 +222,7 @@ public sealed class ActivityRecordingTests
         Assert.Null(ActivityScope.CurrentId);
         fixture.Cognition.SelectionFailure = null;
         await Assert.ThrowsAnyAsync<OperationCanceledException>(
-            () => fixture.Engine.ThinkAsync("principles", new CancellationToken(canceled: true)));
+            () => fixture.Engine.ThinkAsync("principles", cancellationToken: new CancellationToken(canceled: true)));
         Assert.Null(ActivityScope.CurrentId);
         Assert.Empty(fixture.Store.ReadSnapshot().RecallEvents);
         Assert.Single((await fixture.Engine.ThinkAsync("principles")).Memories);
@@ -222,6 +235,7 @@ public sealed class ActivityRecordingTests
         {
             Assert.Null(call.ParentId);
             Assert.Equal("think", call.Details.GetProperty("tool").GetString());
+            Assert.Equal(JsonValueKind.Null, call.Details.GetProperty("context").ValueKind);
         });
         Assert.Null(ActivityScope.CurrentId);
     }
@@ -399,6 +413,7 @@ public sealed class ActivityRecordingTests
         public int Calls { get; private set; }
         public Exception? SelectionFailure { get; set; }
         public List<(string Query, string? Context)> Selections { get; } = [];
+        public List<string> EmbeddedTexts { get; } = [];
         public async Task<CognitiveResult<IReadOnlyList<ObservationProposal>>> ExtractAsync(string raw, CallContext context, CancellationToken cancellationToken)
         {
             Calls++;
@@ -411,6 +426,7 @@ public sealed class ActivityRecordingTests
         public Task<EmbeddingVector> EmbedAsync(string text, CallContext context, CancellationToken cancellationToken)
         {
             Calls++;
+            EmbeddedTexts.Add(text);
             return Task.FromResult(ConsolidationFixture.Vector);
         }
         public Task<CognitiveResult<IReadOnlyList<string>>> SelectAsync(string query, string? context,

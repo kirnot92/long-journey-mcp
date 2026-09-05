@@ -37,12 +37,12 @@ OpenAI 인증 방식, API 종류, 기본 모델과 reasoning effort는 이후 �
 
 모든 기억은 하나의 공간에서 공유한다. 프로젝트별 또는 에이전트별로 기억 공간을 분리하지 않는다.
 
-2026-09-05 사용자 요청으로 `think(topic)`을 추가한다. Public API는 다음 네 개다. 최초 설계의 세 도구 제한에 대한 후속 변경이며, 기존 기억 모델과 근거 제약은 유지한다.
+2026-09-05 사용자 요청으로 `think(topic, context?)`을 추가한다. Public API는 다음 네 개다. 최초 설계의 세 도구 제한에 대한 후속 변경이며, 기존 기억 모델과 근거 제약은 유지한다.
 
 ```text
 remember(raw)
 recall(query, context?)
-think(topic)
+think(topic, context?)
 trace(memory_id)
 ```
 

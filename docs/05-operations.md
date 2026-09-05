@@ -114,7 +114,7 @@ HTTP 통합 테스트는 도구 목록 조회·호출 전 초기화 응답에 �
 | --- | --- | --- |
 | `remember` | `raw` | `source_id`, `duplicate`, `memories`, `status` |
 | `recall` | `query`, 선택적 `context` | `memories` |
-| `think` | `topic` | `memories` |
+| `think` | `topic`, 선택적 `context` | `memories` |
 | `trace` | `memory_id` | `memory_id`, 부모를 포함한 `memories`, 원문이 포함된 `sources` |
 
 `remember`에는 호출 에이전트가 기억할 가치가 있다고 선택한 하나의 일관된 경험과 그 경험을 이해하는 데 필요한 맥락을 전달한다. 명시적인 선호·제약, 중요한 결정, 관찰된 결과, 정정·예외가 기록할 만큼 갖춰졌을 때 호출한다. 매 발화나 도구 실행마다 기록할 필요는 없다. 세션 종료·맥락 압축 전에는 아직 기록하지 않은 유용한 경험을 점검하되, 이미 갖춰진 중요한 경험의 기록을 그때까지 미루지는 않는다.
@@ -134,9 +134,9 @@ Source 생성 시각은 내부에서 기록하며 원문에 등장하는 사건�
 | `recall`의 구체 경험 | 자동화된 배포에서 실패 원인을 추적하기 어려웠던 사례 |
 | `think`의 축적된 관점 | 자동화의 편의성과 실패 시 제어권에 관해 쌓인 관점 |
 
-두 도구는 같은 lexical/embedding 후보 검색과 Responses API의 ID 선택을 사용한다. `think(topic)`은 공통 검색에 `query=topic`, `context=null`을 전달하고, `recall`의 선택적 `context`는 기존처럼 후보 선택 단계에서 사용한다. 쿼리 재작성, depth 필터·가중치, 그래프 확장이나 추가 생성 단계는 없다. 같은 입력과 설정에는 같은 검색·선택 절차를 적용하지만, 별도 모델 호출의 선택 결과가 항상 같다는 보장은 없다. 어느 도구에서도 모든 depth의 기억을 반환할 수 있다.
+두 도구는 같은 lexical/embedding 후보 검색과 Responses API의 ID 선택을 사용한다. `think(topic, context?)`은 공통 경로에 `query=topic`과 전달받은 `context`를 그대로 넘긴다. 두 도구 모두 후보 검색에는 `query` 또는 `topic`만 사용하고, 선택적 `context`는 후보 중 반환할 기억과 순서를 결정하는 모델에 함께 전달한다. 예를 들어 `think`의 주제는 “자동화의 편의성과 실패 시 제어권”, `context`는 “혼자 운영하는 서비스라 장애 복구 부담을 줄이려 한다”로 작성할 수 있다. `context`를 생략하거나 null로 전달하면 null을 사용하며, 빈 문자열과 공백은 그대로 유지한다. 쿼리 재작성, depth 필터·가중치, 그래프 확장이나 추가 생성 단계는 없다. 같은 입력과 설정에는 같은 검색·선택 절차를 적용하지만, 별도 모델 호출의 선택 결과가 항상 같다는 보장은 없다. 어느 도구에서도 모든 depth의 기억을 반환할 수 있다.
 
-Think는 `OpenAI:Recall` 모델·추론 설정, `Engine:SearchCandidates`, `Engine:RecallLimit`, `Engine:MaxRawCharacters`를 공유한다. `topic`은 공백일 수 없으며 입력 상한은 기본 4,000 UTF-16 code unit이다. 반환 형식은 Recall과 같은 `memories`다.
+Think는 `OpenAI:Recall` 모델·추론 설정, `Engine:SearchCandidates`, `Engine:RecallLimit`, `Engine:MaxRawCharacters`를 공유한다. `topic`은 공백일 수 없으며 `topic`과 `context` 각각에 기본 4,000 UTF-16 code unit의 입력 상한을 적용한다. 반환 형식은 Recall과 같은 `memories`다.
 
 두 도구 모두 회수 시각과 recall event를 기록하므로 읽기 전용 호출은 아니다. 회수 기록은 다음 Dream의 seed에 활용하지만 별도의 증거·truth·confidence·retrieval boost로 변환하지 않는다. 호출 자체가 새 Source·Memory·관계를 생성하지 않는다. API 비용도 같은 검색·선택 경로에 기록한다. [Daily Report](14-daily-report.md)는 기존 recall 집계에 두 도구를 포함하고 상세 JSON의 `details.tool`로 호출을 구분한다.
 

@@ -62,9 +62,10 @@ public sealed class MemoryTools(MemoryEngine engine, ILogger<MemoryTools> logger
     [Description("Retrieve accumulated philosophy, principles, patterns, or perspectives relevant to a topic, for example before choosing a design direction or comparing approaches. Phrase topic as the broader idea or tension you want to consider; use recall for specific experiences or facts. Searches existing memories using the same search and selection as recall, without depth filtering or preference; results may include any depth. Does not generate new thinking or create memories. Records recall time without reinforcing truth, confidence, or ranking. Relations are outgoing only.")]
     public Task<RecallResult> ThinkAsync(
         [Description("The broader idea, principle, pattern, or tension to search for among accumulated perspectives.")] string topic,
+        [Description("Optional context for selecting relevant memories.")] string? context = null,
         CancellationToken cancellationToken = default)
     {
-        return InvokeToolAsync(() => engine.ThinkAsync(topic, cancellationToken));
+        return InvokeToolAsync(() => engine.ThinkAsync(topic, context, cancellationToken));
     }
 
     [McpServerTool(Name = "trace", UseStructuredContent = true, ReadOnly = true, OpenWorld = false)]

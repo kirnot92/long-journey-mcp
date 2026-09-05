@@ -52,7 +52,7 @@ public sealed class DailyReportTests
         fixture.Operation("recall1", "recall", "agent", "2026-09-04T03:00:00Z", "complete",
             new { tool = "recall", query = "| <query>\n", context = "context", candidate_ids = new[] { "d0b", "d0a" }, returned_ids = new[] { "d0a", "d0b" } });
         fixture.Operation("recall2", "recall", "agent", "2026-09-04T03:01:00Z", "complete",
-            new { tool = "think", query = "accumulated design principles", context = (string?)null, candidate_ids = new[] { "d0a" }, returned_ids = new[] { "d0a" } });
+            new { tool = "think", query = "accumulated design principles", context = "solo operation | recovery\nconstraints", candidate_ids = new[] { "d0a" }, returned_ids = new[] { "d0a" } });
         fixture.Execute("INSERT INTO runs VALUES(1,'dream','2026-09-01T00:00:00Z','2026-09-02T00:00:00Z','2026-09-04T04:00:00Z','complete')");
         fixture.Operation("assim", "assimilation", "dream", "2026-09-04T04:00:00Z", "complete",
             new { seed_id = "d0b", candidate_ids = new[] { "d0a" }, model_invoked = true, proposal_reused = false, relations = new[] { new { memory_id = "d0a", related_memory_id = "d0b", kind = "positive" } } }, run: 1, work: "assimilate:d0b");
@@ -78,7 +78,7 @@ public sealed class DailyReportTests
         Assert.Equal("recall", thought["kind"]!.GetValue<string>());
         Assert.Equal("think", thought["details"]!["tool"]!.GetValue<string>());
         Assert.Equal("accumulated design principles", thought["details"]!["query"]!.GetValue<string>());
-        Assert.Null(thought["details"]!["context"]);
+        Assert.Equal("solo operation | recovery\nconstraints", thought["details"]!["context"]!.GetValue<string>());
         Assert.Equal("d0a", thought["details"]!["returned_ids"]![0]!.GetValue<string>());
         Assert.Equal(content, json["memories"]!.AsArray().Single(row => row!["id"]!.GetValue<string>() == "d0a")!["content"]!.GetValue<string>());
         Assert.Equal("high", json["api_calls"]![0]!["settings"]!["reasoning_effort"]!.GetValue<string>());

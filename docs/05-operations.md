@@ -70,6 +70,41 @@ Source당 observation 기본 상한은 3개다. 이 값은 첫 실사용을 위�
 
 Core invariant는 모든 생성 경로에서 강제한다. 같은 바로 아래 depth의 부모가 최소 B개 있어야 하고, 서로 다른 Source root의 합집합이 `B^depth` 이상이어야 한다. `RootBase`는 신규 corpus에서 선택하며 기존 corpus의 값을 설정만 바꿔 변경할 수 없다. 원문·content·부모 provenance는 생성 뒤 수정하지 않는다.
 
+## 도구 발견과 설명 노출
+
+서버가 클라이언트에 도구 정보를 제공하는 시점과 클라이언트가 그 정보를 모델의 문맥에 넣는 시점은 구분한다.
+MCP `2025-11-25`의 `initialize` 응답에는 `serverInfo.description`과 선택적인 `instructions`를 제공할 수 있으며,
+개별 도구의 설명과 입력 스키마는 `tools/list`로 조회한다.
+MCP 규격은 모델에게 모든 도구 설명을 처음부터 보여주도록 요구하지 않는다.
+`instructions`도 모델에 전달할 수 있는 지침이며 클라이언트가 반드시 전달한다는 보장은 없다.
+근거: [MCP 초기화 절차](https://modelcontextprotocol.io/specification/2025-11-25/basic/lifecycle),
+[InitializeResult와 Implementation 스키마](https://modelcontextprotocol.io/specification/2025-11-25/schema).
+
+OpenAI의 tool search에서 MCP 서버를 지연 로딩하면 모델은 먼저 서버 이름과 설명을 보고,
+검색으로 도구를 불러온 뒤 개별 정의를 읽는다.
+따라서 도구를 찾아야 하는 이유를 `remember`의 개별 설명에만 두면 검색 전에는 그 이유를 보지 못할 수 있다.
+이는 해당 클라이언트의 지연 로딩 방식이며 모든 MCP 연결의 공통 동작은 아니다.
+근거: [OpenAI tool search](https://developers.openai.com/api/docs/guides/tools-tool-search#use-namespaces-where-possible).
+
+Long Journey는 서버 설명에 공유 장기 기억의 역할과 검색·기록 시점을 요약하고,
+서버 사용 지침에 `recall`·`remember`·`trace`의 사용 흐름을 제공한다.
+개별 도구 설명에는 raw 작성 규칙과 실제 설정 상한 등 호출에 필요한 세부사항을 유지한다.
+이는 도구 목록 조회 전에도 클라이언트가 사용 지침을 얻도록 하는 변경이며,
+모델이 지침을 읽거나 자동으로 기억 도구를 호출한다는 보장은 아니다.
+
+클라이언트가 자체 서버 설명을 사용하는 경우에는 그 설명에도 검색·기록 시점을 담는다.
+예를 들어 OpenAI Responses API의 MCP 도구 설정에 있는 `server_description`은 API 요청 측 설정이며,
+MCP 초기화의 `serverInfo.description`과 별개다.
+클라이언트가 초기화 응답을 이 설정으로 옮기는지는 해당 클라이언트에서 확인해야 한다.
+근거: [OpenAI MCP 서버 연결](https://developers.openai.com/api/docs/guides/tools-connectors-mcp).
+설정용 설명은 다음처럼 작성할 수 있다.
+
+> Shared long-term memory across agents and sessions. Recall relevant preferences, constraints, decisions, and past outcomes; remember meaningful new preferences, decisions, outcomes, and corrections for future sessions; trace memories to their original evidence.
+
+서버 수정 후에는 서버를 재시작하고 클라이언트를 재연결하거나 메타데이터를 새로 불러온다.
+HTTP 통합 테스트는 도구 목록 조회·호출 전 초기화 응답에 설명과 지침이 포함되는지 검증한다.
+실제 클라이언트가 모델에 어떤 문맥을 전달하는지는 이 테스트의 검증 범위에 포함하지 않는다.
+
 ## MCP 도구와 결과
 
 공개 도구는 정확히 다음 세 개다. 반환 객체는 JSON `snake_case` 이름의 structured content로 제공된다.

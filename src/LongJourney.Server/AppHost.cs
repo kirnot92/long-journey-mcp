@@ -1,9 +1,12 @@
 using System.Net;
+using System.Reflection;
 using LongJourney.Core;
 using LongJourney.OpenAI;
 using Microsoft.Extensions.DependencyInjection.Extensions;
 using Microsoft.Extensions.Logging.Console;
 using ModelContextProtocol.AspNetCore;
+using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
 
 namespace LongJourney.Server;
 
@@ -39,7 +42,7 @@ public static class AppHost
 
         builder.Services.AddRazorPages();
 
-        builder.Services.AddMcpServer()
+        builder.Services.AddMcpServer(ConfigureMcpMetadata)
             .WithHttpTransport(options => options.SessionMode = HttpServerSessionMode.Stateless)
             .WithTools(MemoryTools.CreateTools(engineOptions));
 
@@ -57,6 +60,28 @@ public static class AppHost
             app.DisposeAsync().AsTask().GetAwaiter().GetResult();
             throw;
         }
+    }
+
+    private static void ConfigureMcpMetadata(McpServerOptions options)
+    {
+        // Match SDK 2.2's default identity while adding discovery metadata.
+        var assemblyName = (Assembly.GetEntryAssembly() ?? typeof(McpServer).Assembly).GetName();
+        options.ServerInfo ??= new Implementation
+        {
+            Name = assemblyName.Name ?? "McpServer",
+            Version = assemblyName.Version?.ToString() ?? "1.0.0"
+        };
+        options.ServerInfo.Description = """
+            Shared long-term memory across agents and sessions. Find prior preferences, constraints, decisions, and outcomes when they can help the current task.
+            Save meaningful new preferences, constraints, decisions, outcomes, and corrections for future use. Trace memories to their original evidence when context or provenance matters.
+            """;
+        options.ServerInstructions = """
+            Use recall when prior preferences, constraints, decisions, or outcomes could help the current task, especially when continuing earlier work.
+            Use remember when a meaningful new experience is clear enough to preserve; do not record every message or tool result.
+            Before a context reset or session end, check for useful experiences not yet saved.
+            Use trace to inspect original evidence when a memory's context or provenance matters.
+            Load the relevant detailed tool definitions before calling; follow their input and recording guidance.
+            """;
     }
 
     // Shared with report-only configuration loading; constructing a builder does not start services.
